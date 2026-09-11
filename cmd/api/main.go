@@ -51,11 +51,11 @@ func run(logger *slog.Logger) error {
 	// Migrasi jalan saat start, bukan lewat perintah terpisah. Langkah terpisah
 	// adalah langkah yang bisa terlupa, dan skema yang tertinggal satu kolom
 	// gagalnya tidak selalu langsung terlihat.
-	schema, err := migrations.All()
+	list, err := migrations.All()
 	if err != nil {
 		return err
 	}
-	if err := db.Migrate(context.Background(), schema); err != nil {
+	if err := db.Migrate(context.Background(), list); err != nil {
 		return err
 	}
 
@@ -64,9 +64,17 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 
+	handler, janitor := api.Build(db, files, cfg, logger)
+
+	// Sapuan berkas berjalan selama servis hidup, dan berhenti begitu servis
+	// diminta mati. Tidak ditunggu: yang terpotong di tengah aman diulang.
+	kerja, hentikanKerja := context.WithCancel(context.Background())
+	defer hentikanKerja()
+	go janitor.Run(kerja)
+
 	server := &http.Server{
 		Addr:    cfg.Address,
-		Handler: api.Build(db, files, cfg, logger),
+		Handler: handler,
 
 		// Tanpa batas baca dan tulis, dan itu disengaja.
 		//
@@ -86,6 +94,7 @@ func run(logger *slog.Logger) error {
 	go func() {
 		<-stop
 		logger.Info("servis diminta berhenti")
+		hentikanKerja()
 
 		ctx, cancel := context.WithTimeout(context.Background(), config.ShutdownGrace)
 		defer cancel()
@@ -95,7 +104,10 @@ func run(logger *slog.Logger) error {
 		}
 	}()
 
-	logger.Info("servis menyala", "address", cfg.Address, "storage", cfg.StorageDir)
+	logger.Info("servis menyala",
+		"address", cfg.Address,
+		"storage", cfg.StorageDir,
+		"retensi_hari", cfg.RetentionDays)
 
 	if err := server.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 		return err

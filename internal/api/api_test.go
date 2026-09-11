@@ -3,13 +3,16 @@ package api_test
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,6 +25,10 @@ import (
 )
 
 const adminKey = "kunci-induk-untuk-pengujian-yang-panjangnya-cukup"
+
+// janitors menghubungkan server uji dengan sapuannya, supaya uji yang perlu
+// menjalankan sapuan tidak harus merakit servisnya sendiri.
+var janitors = map[*httptest.Server]*api.Janitor{}
 
 // setup merakit servis lengkap di atas SQLite sungguhan.
 //
@@ -36,14 +43,24 @@ func setup(t *testing.T) *httptest.Server {
 // setupWith ikut mengembalikan pengaturannya, untuk uji yang perlu
 // mengintip isi folder penyimpanan.
 func setupWith(t *testing.T) (*httptest.Server, config.Config) {
+	return setupTuned(t, nil)
+}
+
+// setupTuned membiarkan satu uji mengubah pengaturannya sebelum servis dirakit.
+func setupTuned(t *testing.T, ubah func(*config.Config)) (*httptest.Server, config.Config) {
 	t.Helper()
 
 	dir := t.TempDir()
 	cfg := config.Config{
-		StorageDir:  dir,
-		AdminKey:    adminKey,
-		MaxUploadMB: 200,
-		Address:     ":0",
+		StorageDir:        dir,
+		AdminKey:          adminKey,
+		MaxUploadMB:       200,
+		RetentionDays:     90,
+		ClaimTimeoutHours: 2,
+		Address:           ":0",
+	}
+	if ubah != nil {
+		ubah(&cfg)
 	}
 
 	db, err := database.Open(cfg.DatabasePath())
@@ -52,11 +69,11 @@ func setupWith(t *testing.T) (*httptest.Server, config.Config) {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 
-	schema, err := migrations.All()
+	list, err := migrations.All()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Migrate(context.Background(), schema); err != nil {
+	if err := db.Migrate(context.Background(), list); err != nil {
 		t.Fatal(err)
 	}
 
@@ -69,8 +86,14 @@ func setupWith(t *testing.T) (*httptest.Server, config.Config) {
 	// uji membuat kegagalan sungguhan susah ditemukan.
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	srv := httptest.NewServer(api.Build(db, files, cfg, logger))
+	handler, janitor := api.Build(db, files, cfg, logger)
+	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
+
+	// Janitor tidak dinyalakan di sini: uji yang butuh sapuan memanggil
+	// janitor.Once sendiri, supaya hasilnya tidak bergantung pada waktu.
+	janitors[srv] = janitor
+
 	return srv, cfg
 }
 
@@ -171,6 +194,7 @@ type content struct {
 	Checksum      string  `json:"checksum"`
 	ClaimedBy     *string `json:"claimed_by"`
 	FailureReason *string `json:"failure_reason"`
+	FileRemovedAt *string `json:"file_removed_at"`
 }
 
 // registerApp menerbitkan satu kunci aplikasi lewat kunci induk.
@@ -578,5 +602,437 @@ func TestOnlyTheClaimerCanReport(t *testing.T) {
 	// Yang mengclaim tetap bisa melapor.
 	if res := postJSON(t, srv, "/v1/contents/"+c.ID+"/publication", winner, `{"published":true}`); res.Code != 200 {
 		t.Fatalf("pengclaim harus bisa melapor: %+v", res)
+	}
+}
+
+// TestRescheduleMissingContentSaysNotFound menjaga kalimat penolakan tetap
+// jujur.
+//
+// Nol baris yang berubah punya dua sebab yang berbeda jauh: kontennya tidak ada,
+// atau sudah tayang. Sempat dijawab sama — "Published content cannot be
+// rescheduled" untuk id yang tidak pernah ada — dan yang salah ketik id akan
+// mencari-cari konten yang tidak pernah ada.
+func TestRescheduleMissingContentSaysNotFound(t *testing.T) {
+	srv := setup(t)
+	key := registerApp(t, srv, "poster-1")
+
+	res := postJSON(t, srv, "/v1/contents/tidak-ada/schedule", key,
+		`{"scheduled_at":"`+at(time.Hour)+`"}`)
+	if res.Status != "not_found" {
+		t.Fatalf("id yang tidak ada harus not_found, dapat %+v", res)
+	}
+
+	// Yang sudah tayang tetap ditolak dengan sebabnya sendiri.
+	c := decode[content](t, upload(t, srv, key, at(-time.Hour), "isi-berkas"))
+	postJSON(t, srv, "/v1/contents/"+c.ID+"/claim", key, `{}`)
+	postJSON(t, srv, "/v1/contents/"+c.ID+"/publication", key, `{"published":true}`)
+
+	res = postJSON(t, srv, "/v1/contents/"+c.ID+"/schedule", key,
+		`{"scheduled_at":"`+at(time.Hour)+`"}`)
+	if res.Status != "invalid_input" {
+		t.Fatalf("yang sudah tayang harus invalid_input, dapat %+v", res)
+	}
+}
+
+// TestClaimRejectionNamesTheRealState menjaga kalimat penolakan tetap menunjuk
+// tempat yang benar.
+//
+// Golongannya memang satu — tindakan pemanggil sama: lewati, ambil berikutnya.
+// Tapi "sudah diambil aplikasi lain" untuk konten yang sebenarnya sudah tayang
+// membuat yang membaca log mencari aplikasi yang tidak pernah ada.
+func TestClaimRejectionNamesTheRealState(t *testing.T) {
+	srv := setup(t)
+	key := registerApp(t, srv, "poster-1")
+	lain := registerApp(t, srv, "poster-2")
+
+	published := decode[content](t, upload(t, srv, key, at(-time.Hour), "isi-berkas"))
+	postJSON(t, srv, "/v1/contents/"+published.ID+"/claim", key, `{}`)
+	postJSON(t, srv, "/v1/contents/"+published.ID+"/publication", key, `{"published":true}`)
+
+	archived := decode[content](t, upload(t, srv, key, at(-time.Hour), "isi-berkas"))
+	postJSON(t, srv, "/v1/contents/"+archived.ID+"/archival", key, `{}`)
+
+	held := decode[content](t, upload(t, srv, key, at(-time.Hour), "isi-berkas"))
+	postJSON(t, srv, "/v1/contents/"+held.ID+"/claim", key, `{}`)
+
+	for _, uji := range []struct{ id, sebut string }{
+		{published.ID, "published"},
+		{archived.ID, "archived"},
+		{held.ID, "claimed"},
+	} {
+		res := postJSON(t, srv, "/v1/contents/"+uji.id+"/claim", lain, `{}`)
+		if res.Status != "already_claimed" {
+			t.Fatalf("%s: golongannya harus tetap already_claimed, dapat %q", uji.sebut, res.Status)
+		}
+		if !strings.Contains(strings.ToLower(res.Message), uji.sebut) {
+			t.Fatalf("%s: kalimatnya tidak menyebut keadaan sebenarnya: %q", uji.sebut, res.Message)
+		}
+	}
+}
+
+// TestOversizedUploadIsTheSendersProblem memisahkan dua sebab yang sempat
+// tercampur jadi satu kalimat.
+//
+// Berkas yang memang melewati batas itu salah pengirim — 400, dan kalimatnya
+// menyebut batasnya. Yang **tidak** boleh ikut ke sana: ruang penyimpanan servis
+// yang habis. Itu 500, supaya pemantauan melihatnya dan integrator tidak
+// mengecilkan videonya berulang kali padahal yang perlu ditambah adalah disk.
+func TestOversizedUploadIsTheSendersProblem(t *testing.T) {
+	srv, _ := setupTuned(t, func(c *config.Config) { c.MaxUploadMB = 1 })
+	key := registerApp(t, srv, "poster-1")
+
+	res := upload(t, srv, key, at(time.Hour), strings.Repeat("x", 2<<20))
+	if res.Status != "invalid_input" {
+		t.Fatalf("berkas kebesaran harus invalid_input, dapat %+v", res)
+	}
+	if !strings.Contains(res.Message, "larger than the allowed limit") {
+		t.Fatalf("kalimatnya harus menyebut batas, dapat %q", res.Message)
+	}
+}
+
+// tuakan memundurkan waktu selesai sebuah konten langsung di database.
+//
+// Lewat SQL karena tidak ada alamat yang bisa melakukannya — dan memang tidak
+// boleh ada. Sapuan retensi tidak bisa diuji dengan menunggu sembilan puluh
+// hari berlalu.
+func tuakan(t *testing.T, cfg config.Config, id, kapan string) {
+	t.Helper()
+
+	db, err := sql.Open("sqlite", cfg.DatabasePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	_, err = db.Exec(`UPDATE contents
+		SET published_at = CASE WHEN published_at IS NOT NULL THEN ? END,
+		    archived_at  = CASE WHEN archived_at  IS NOT NULL THEN ? END
+		WHERE id = ?`, kapan, kapan, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func adaBerkas(t *testing.T, cfg config.Config, id string) bool {
+	t.Helper()
+
+	_, err := os.Stat(filepath.Join(cfg.FileDir(), id))
+	return err == nil
+}
+
+// TestRetentionRemovesFilesButKeepsRecords adalah janji sapuan retensi:
+// disknya kosong, riwayatnya tetap.
+func TestRetentionRemovesFilesButKeepsRecords(t *testing.T) {
+	srv, cfg := setupWith(t)
+	key := registerApp(t, srv, "poster-1")
+
+	// Sudah tayang, dan sudah lama.
+	tayang := decode[content](t, upload(t, srv, key, at(-time.Hour), "isi-tayang"))
+	postJSON(t, srv, "/v1/contents/"+tayang.ID+"/claim", key, `{}`)
+	postJSON(t, srv, "/v1/contents/"+tayang.ID+"/publication", key, `{"published":true}`)
+	tuakan(t, cfg, tayang.ID, "2020-01-01 00:00:00")
+
+	// Dibatalkan, dan sudah lama.
+	batal := decode[content](t, upload(t, srv, key, at(-time.Hour), "isi-batal"))
+	postJSON(t, srv, "/v1/contents/"+batal.ID+"/archival", key, `{}`)
+	tuakan(t, cfg, batal.ID, "2020-01-01 00:00:00")
+
+	// Sudah tayang, tapi baru kemarin.
+	baru := decode[content](t, upload(t, srv, key, at(-time.Hour), "isi-baru"))
+	postJSON(t, srv, "/v1/contents/"+baru.ID+"/claim", key, `{}`)
+	postJSON(t, srv, "/v1/contents/"+baru.ID+"/publication", key, `{"published":true}`)
+
+	// Belum pernah tayang. Stok yang menunggu giliran bukan sampah, berapa lama
+	// pun sudah diunggah.
+	stok := decode[content](t, upload(t, srv, key, at(24*time.Hour), "isi-stok"))
+
+	if err := janitors[srv].Once(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, uji := range []struct {
+		id     string
+		hilang bool
+		sebut  string
+	}{
+		{tayang.ID, true, "tayang lama"},
+		{batal.ID, true, "dibatalkan lama"},
+		{baru.ID, false, "tayang kemarin"},
+		{stok.ID, false, "stok menunggu giliran"},
+	} {
+		if adaBerkas(t, cfg, uji.id) == uji.hilang {
+			t.Fatalf("%s: berkasnya %s padahal seharusnya %s", uji.sebut,
+				map[bool]string{true: "masih ada", false: "hilang"}[!uji.hilang],
+				map[bool]string{true: "dibuang", false: "disimpan"}[uji.hilang])
+		}
+
+		// Barisnya tetap terbaca, apa pun nasib berkasnya.
+		res := call(t, srv, "GET", "/v1/contents/"+uji.id, key, nil, "")
+		if res.Code != 200 {
+			t.Fatalf("%s: barisnya ikut hilang: %+v", uji.sebut, res)
+		}
+		c := decode[content](t, res)
+		if (c.FileRemovedAt != nil) != uji.hilang {
+			t.Fatalf("%s: penanda file_removed_at tidak cocok: %+v", uji.sebut, c.FileRemovedAt)
+		}
+	}
+}
+
+// TestRetentionIsSafeToRepeat menjaga sifat yang membuat sapuan boleh dipanggil
+// tiap servis menyala.
+func TestRetentionIsSafeToRepeat(t *testing.T) {
+	srv, cfg := setupWith(t)
+	key := registerApp(t, srv, "poster-1")
+
+	c := decode[content](t, upload(t, srv, key, at(-time.Hour), "isi-berkas"))
+	postJSON(t, srv, "/v1/contents/"+c.ID+"/claim", key, `{}`)
+	postJSON(t, srv, "/v1/contents/"+c.ID+"/publication", key, `{"published":true}`)
+	tuakan(t, cfg, c.ID, "2020-01-01 00:00:00")
+
+	if err := janitors[srv].Once(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if adaBerkas(t, cfg, c.ID) {
+		t.Fatal("sapuan pertama tidak membuang berkasnya")
+	}
+
+	// Sapuan kedua atas gudang yang sudah bersih tidak boleh jadi galat — ia
+	// dipanggil tiap servis menyala, dan servis bisa restart lima kali sejam.
+	if err := janitors[srv].Once(context.Background()); err != nil {
+		t.Fatalf("sapuan kedua gagal: %v", err)
+	}
+
+	res := call(t, srv, "GET", "/v1/contents/"+c.ID, key, nil, "")
+	if res.Code != 200 || decode[content](t, res).FileRemovedAt == nil {
+		t.Fatalf("barisnya harus tetap ada dan bertanda: %+v", res)
+	}
+}
+
+// TestPurgedContentAnswersHonestly menjaga dua jawaban yang gampang jadi
+// membingungkan setelah berkasnya dibuang.
+func TestPurgedContentAnswersHonestly(t *testing.T) {
+	srv, cfg := setupWith(t)
+	key := registerApp(t, srv, "poster-1")
+
+	c := decode[content](t, upload(t, srv, key, at(-time.Hour), "isi-berkas"))
+	postJSON(t, srv, "/v1/contents/"+c.ID+"/claim", key, `{}`)
+	postJSON(t, srv, "/v1/contents/"+c.ID+"/publication", key, `{"published":true}`)
+	tuakan(t, cfg, c.ID, "2020-01-01 00:00:00")
+
+	if err := janitors[srv].Once(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Mengunduh: sebabnya disebut, bukan 404 polos yang membuat integrator
+	// mengira ada yang rusak lalu mencoba lagi berkali-kali.
+	res := call(t, srv, "GET", "/v1/contents/"+c.ID+"/file", key, nil, "")
+	if res.Status != "not_found" || !strings.Contains(res.Message, "retention") {
+		t.Fatalf("unduhan setelah disapu harus menyebut retensi: %+v", res)
+	}
+
+	// Menjadwalkan ulang: ditolak. Kalau lolos, ia masuk antrean lagi,
+	// integrator mengambilnya, lalu gagal mengunduh selamanya.
+	res = postJSON(t, srv, "/v1/contents/"+c.ID+"/schedule", key,
+		`{"scheduled_at":"`+at(time.Hour)+`"}`)
+	if res.Status != "invalid_input" || !strings.Contains(res.Message, "retention") {
+		t.Fatalf("penjadwalan ulang setelah disapu harus menyebut retensi: %+v", res)
+	}
+}
+
+// TestRetentionOffKeepsEverything menjaga pilihan "jangan pernah buang" tetap
+// berarti apa adanya.
+func TestRetentionOffKeepsEverything(t *testing.T) {
+	srv, cfg := setupTuned(t, func(c *config.Config) { c.RetentionDays = 0 })
+	key := registerApp(t, srv, "poster-1")
+
+	c := decode[content](t, upload(t, srv, key, at(-time.Hour), "isi-berkas"))
+	postJSON(t, srv, "/v1/contents/"+c.ID+"/claim", key, `{}`)
+	postJSON(t, srv, "/v1/contents/"+c.ID+"/publication", key, `{"published":true}`)
+	tuakan(t, cfg, c.ID, "2020-01-01 00:00:00")
+
+	if err := janitors[srv].Once(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !adaBerkas(t, cfg, c.ID) {
+		t.Fatal("berkasnya hilang padahal retensi dimatikan")
+	}
+}
+
+// tuakanClaim memundurkan waktu claim langsung di database.
+func tuakanClaim(t *testing.T, cfg config.Config, id, kapan string) {
+	t.Helper()
+
+	db, err := sql.Open("sqlite", cfg.DatabasePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	if _, err := db.Exec(`UPDATE contents SET claimed_at = ? WHERE id = ?`, kapan, id); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestStuckClaimReturnsToQueue menutup satu-satunya cara konten bisa hilang
+// diam-diam.
+//
+// Integrator yang mati sesudah mengclaim membuat kontennya diam di `claimed`
+// selamanya: tidak pernah tayang, dan tidak pernah muncul lagi di antrean kerja
+// karena antrean itu memang sengaja menyembunyikan yang sedang dipegang orang.
+func TestStuckClaimReturnsToQueue(t *testing.T) {
+	srv, cfg := setupWith(t)
+	key := registerApp(t, srv, "poster-1")
+
+	// Diclaim lalu ditinggalkan tiga jam lalu — lewat ambang dua jam.
+	nyangkut := decode[content](t, upload(t, srv, key, at(-time.Hour), "isi-nyangkut"))
+	postJSON(t, srv, "/v1/contents/"+nyangkut.ID+"/claim", key, `{}`)
+	tuakanClaim(t, cfg, nyangkut.ID, at(-3*time.Hour))
+
+	// Baru saja diclaim, dan mungkin sedang mengunggah videonya. Tidak boleh
+	// direbut — kalau direbut, kontennya tayang dua kali.
+	sedangJalan := decode[content](t, upload(t, srv, key, at(-time.Hour), "isi-jalan"))
+	postJSON(t, srv, "/v1/contents/"+sedangJalan.ID+"/claim", key, `{}`)
+
+	if err := janitors[srv].Once(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	lepas := decode[content](t, call(t, srv, "GET", "/v1/contents/"+nyangkut.ID, key, nil, ""))
+	if lepas.Status != "scheduled" || lepas.ClaimedBy != nil {
+		t.Fatalf("yang tersangkut harus kembali ke antrean: %+v", lepas)
+	}
+
+	masih := decode[content](t, call(t, srv, "GET", "/v1/contents/"+sedangJalan.ID, key, nil, ""))
+	if masih.Status != "claimed" {
+		t.Fatalf("yang baru diclaim tidak boleh direbut: %+v", masih)
+	}
+
+	// Dan benar-benar bisa diambil lagi — jadwalnya tidak ikut berubah, jadi ia
+	// langsung masuk antrean kerja.
+	queue := decode[page](t, call(t, srv, "GET", "/v1/contents?scope=due", key, nil, "")).Items
+	if len(queue) != 1 || queue[0].ID != nyangkut.ID {
+		t.Fatalf("yang dilepas harus muncul di antrean kerja: %+v", queue)
+	}
+}
+
+// TestClaimTimeoutOffKeepsHolding menjaga pilihan "jangan pernah lepas" tetap
+// berarti apa adanya.
+func TestClaimTimeoutOffKeepsHolding(t *testing.T) {
+	srv, cfg := setupTuned(t, func(c *config.Config) { c.ClaimTimeoutHours = 0 })
+	key := registerApp(t, srv, "poster-1")
+
+	c := decode[content](t, upload(t, srv, key, at(-time.Hour), "isi-berkas"))
+	postJSON(t, srv, "/v1/contents/"+c.ID+"/claim", key, `{}`)
+	tuakanClaim(t, cfg, c.ID, at(-30*24*time.Hour))
+
+	if err := janitors[srv].Once(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	after := decode[content](t, call(t, srv, "GET", "/v1/contents/"+c.ID, key, nil, ""))
+	if after.Status != "claimed" {
+		t.Fatalf("ambang dimatikan, claim tidak boleh dilepas: %+v", after)
+	}
+}
+
+// TestStaleUploadsAreSweptAway menutup satu-satunya sampah yang tidak punya
+// baris di database.
+//
+// Servis yang mati mendadak di tengah penulisan meninggalkan berkas `upload-*`
+// separuh. Tidak ada yang tahu id-nya, jadi sapuan retensi tidak akan pernah
+// melihatnya — ia memakan disk selamanya.
+func TestStaleUploadsAreSweptAway(t *testing.T) {
+	srv, cfg := setupWith(t)
+
+	lama := filepath.Join(cfg.FileDir(), "upload-1234567890")
+	if err := os.WriteFile(lama, []byte("separuh"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	kemarin := time.Now().Add(-24 * time.Hour)
+	if err := os.Chtimes(lama, kemarin, kemarin); err != nil {
+		t.Fatal(err)
+	}
+
+	// Yang baru dibuat mungkin milik unggahan yang sedang berjalan. Membuangnya
+	// jauh lebih buruk daripada membiarkan sampah menginap setengah hari.
+	baru := filepath.Join(cfg.FileDir(), "upload-9999999999")
+	if err := os.WriteFile(baru, []byte("sedang-berjalan"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Berkas konten biasa tidak boleh ikut terbawa.
+	key := registerApp(t, srv, "poster-1")
+	c := decode[content](t, upload(t, srv, key, at(time.Hour), "isi-berkas"))
+
+	if err := janitors[srv].Once(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(lama); !os.IsNotExist(err) {
+		t.Fatal("berkas sementara yang ditinggalkan tidak dibuang")
+	}
+	if _, err := os.Stat(baru); err != nil {
+		t.Fatal("berkas sementara yang masih baru ikut dibuang")
+	}
+	if !adaBerkas(t, cfg, c.ID) {
+		t.Fatal("berkas konten yang sah ikut terbawa sapuan")
+	}
+}
+
+// TestStaleUploadSweepIgnoresRetentionSetting menjaga pemisahan yang gampang
+// tertukar: sampah bukan kebijakan penyimpanan.
+//
+// Yang memilih menyimpan kontennya selamanya tetap tidak ingin menyimpan
+// potongan unggahan yang gagal.
+func TestStaleUploadSweepIgnoresRetentionSetting(t *testing.T) {
+	srv, cfg := setupTuned(t, func(c *config.Config) { c.RetentionDays = 0 })
+
+	sampah := filepath.Join(cfg.FileDir(), "upload-5555555555")
+	if err := os.WriteFile(sampah, []byte("separuh"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	kemarin := time.Now().Add(-24 * time.Hour)
+	if err := os.Chtimes(sampah, kemarin, kemarin); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := janitors[srv].Once(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(sampah); !os.IsNotExist(err) {
+		t.Fatal("retensi dimatikan seharusnya tidak ikut mematikan pembuangan sampah")
+	}
+}
+
+// TestPurgeDrainsBacklogInOneSweep menjaga batas per kueri tidak berubah jadi
+// batas per hari.
+//
+// Sapuan jalan sekali sehari. Kalau satu jalan cuma membersihkan satu batch,
+// gudang berisi ribuan berkas kedaluwarsa butuh berbulan-bulan untuk bersih —
+// dan itu justru keadaan yang membuat retensi dinyalakan.
+func TestPurgeDrainsBacklogInOneSweep(t *testing.T) {
+	srv, cfg := setupWith(t)
+	key := registerApp(t, srv, "poster-1")
+
+	// Lebih banyak dari satu batch (200) tidak realistis untuk uji; yang
+	// dibuktikan di sini cukup bahwa perulangannya berjalan, bukan angkanya.
+	const jumlah = 5
+	ids := make([]string, 0, jumlah)
+	for i := 0; i < jumlah; i++ {
+		c := decode[content](t, upload(t, srv, key, at(-time.Hour), "isi-berkas"))
+		postJSON(t, srv, "/v1/contents/"+c.ID+"/claim", key, `{}`)
+		postJSON(t, srv, "/v1/contents/"+c.ID+"/publication", key, `{"published":true}`)
+		tuakan(t, cfg, c.ID, "2020-01-01 00:00:00")
+		ids = append(ids, c.ID)
+	}
+
+	if err := janitors[srv].Once(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, id := range ids {
+		if adaBerkas(t, cfg, id) {
+			t.Fatalf("masih ada berkas yang belum disapu: %s", id)
+		}
 	}
 }

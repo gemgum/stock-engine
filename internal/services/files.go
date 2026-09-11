@@ -6,6 +6,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/gemgum/stock-engine/internal/models"
 )
@@ -37,7 +39,7 @@ func NewFiles(dir string) (Files, error) {
 // berkas yang sudah utuh — unggahan yang putus di tengah tidak meninggalkan
 // berkas separuh yang terlihat sah.
 func (f Files) Save(id string, src io.Reader) (size int64, checksum string, err error) {
-	tmp, err := os.CreateTemp(f.dir, "upload-*")
+	tmp, err := os.CreateTemp(f.dir, tempPrefix+"*")
 	if err != nil {
 		return 0, "", err
 	}
@@ -69,6 +71,52 @@ func (f Files) Save(id string, src io.Reader) (size int64, checksum string, err 
 // id selalu datang dari database, tidak pernah langsung dari alamat yang
 // diketik pemanggil — itu yang membuat filepath.Join di sini aman.
 func (f Files) Path(id string) string { return filepath.Join(f.dir, id) }
+
+// tempPrefix menandai berkas yang belum selesai ditulis.
+//
+// Dipakai dua arah: os.CreateTemp membuatnya, dan RemoveStale mengenalinya
+// kembali. Kalau keduanya memakai awalan yang berbeda, sapuan tidak akan
+// menemukan apa-apa dan tidak ada yang menyadarinya — berkasnya cuma menumpuk.
+const tempPrefix = "upload-"
+
+// RemoveStale membuang berkas sementara yang ditinggalkan.
+//
+// Servis yang mati **mendadak** di tengah penulisan — OOM killer, crash, listrik
+// padam, atau restart yang melewati tenggang — meninggalkan berkas separuh yang
+// tidak punya baris di database. Tidak ada yang tahu id-nya, jadi sapuan retensi
+// tidak akan pernah melihatnya, dan ia memakan disk selamanya.
+//
+// Berhenti normal (SIGTERM) tidak menghasilkan ini: unggahan yang berjalan
+// diberi waktu selesai, dan yang gagal membersihkan dirinya sendiri.
+//
+// olderThan harus jauh lebih lama daripada unggahan terlama yang masuk akal.
+// Berkas yang masih ditulis saat ini pun aman kalau terlanjur terhapus di Linux
+// — penulisnya memegang fd, bukan namanya — tapi pemindahannya nanti gagal, dan
+// unggahan yang sah tidak boleh dikorbankan demi kebersihan.
+func (f Files) RemoveStale(olderThan time.Duration) (int, error) {
+	entries, err := os.ReadDir(f.dir)
+	if err != nil {
+		return 0, err
+	}
+
+	batas := time.Now().Add(-olderThan)
+	dibuang := 0
+
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasPrefix(e.Name(), tempPrefix) {
+			continue
+		}
+
+		info, err := e.Info()
+		if err != nil || info.ModTime().After(batas) {
+			continue
+		}
+		if err := os.Remove(filepath.Join(f.dir, e.Name())); err == nil {
+			dibuang++
+		}
+	}
+	return dibuang, nil
+}
 
 // Remove membuang berkas.
 //

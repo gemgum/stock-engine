@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/gemgum/stock-engine/migrations"
 	_ "modernc.org/sqlite"
 )
 
@@ -73,10 +74,59 @@ func (d *DB) Close() error { return d.sql.Close() }
 // permintaan pun, jadi menyebutnya sehat cuma menunda ketahuan.
 func (d *DB) Ping(ctx context.Context) error { return d.sql.PingContext(ctx) }
 
-// Migrate menjalankan skema. Aman diulang: seluruh isinya IF NOT EXISTS.
-func (d *DB) Migrate(ctx context.Context, schema string) error {
-	_, err := d.sql.ExecContext(ctx, schema)
-	return err
+// Migrate menjalankan migrasi yang belum pernah dijalankan, berurutan.
+//
+// Yang sudah tercatat dilewati. Sebelum ada catatan ini seluruh berkas diputar
+// ulang tiap servis menyala — aman selama isinya `IF NOT EXISTS`, dan langsung
+// berbahaya begitu ada `ALTER TABLE`: jalan kedua kalinya menolak, dan servis
+// gagal menyala.
+//
+// Tiap migrasi jalan di dalam satu transaksi bersama catatannya. Yang mati di
+// tengah tidak meninggalkan skema separuh yang dianggap selesai.
+func (d *DB) Migrate(ctx context.Context, list []migrations.Migration) error {
+	const catatan = `CREATE TABLE IF NOT EXISTS schema_migrations (
+		name       TEXT PRIMARY KEY,
+		applied_at TEXT NOT NULL
+	)`
+
+	if _, err := d.sql.ExecContext(ctx, catatan); err != nil {
+		return fmt.Errorf("tabel catatan migrasi gagal dibuat: %w", err)
+	}
+
+	for _, m := range list {
+		var ada int
+		err := d.sql.QueryRowContext(ctx,
+			`SELECT count(*) FROM schema_migrations WHERE name = ?`, m.Name).Scan(&ada)
+		if err != nil {
+			return err
+		}
+		if ada > 0 {
+			continue
+		}
+
+		if err := d.applyMigration(ctx, m); err != nil {
+			return fmt.Errorf("migrasi %s gagal: %w", m.Name, err)
+		}
+	}
+	return nil
+}
+
+func (d *DB) applyMigration(ctx context.Context, m migrations.Migration) error {
+	tx, err := d.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, m.SQL); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO schema_migrations (name, applied_at) VALUES (?, datetime('now'))`,
+		m.Name); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 type contextKey struct{}

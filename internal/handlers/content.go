@@ -7,9 +7,11 @@
 package handlers
 
 import (
+	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
+	"syscall"
 
 	"github.com/gemgum/stock-engine/internal/models"
 	"github.com/gemgum/stock-engine/internal/services"
@@ -38,14 +40,20 @@ func NewContentHandler(service *services.ContentService, maxUpload int64,
 func (h *ContentHandler) Upload(w http.ResponseWriter, r *http.Request) error {
 	r.Body = http.MaxBytesReader(w, r.Body, h.maxUpload)
 
-	// 32MB ditahan di memori, sisanya ditulis ke berkas sementara oleh
-	// pustaka bawaan.
+	// 1MB ditahan di memori, sisanya ditulis ke berkas sementara oleh pustaka
+	// bawaan.
+	//
+	// Angkanya kecil dengan sengaja, dan ini diukur: dengan 32MB, tiga unggahan
+	// 150MB beruntun membuat servis menetap di 239MB memori; dengan 1MB, 20MB.
+	// Berkasnya toh selalu berakhir di disk — yang ditahan di memori cuma
+	// penyangga sementara, dan 1MB sudah jauh lebih dari cukup untuk caption dan
+	// jadwal yang menyertainya.
 	//
 	// ponytail: berkas besar jadi ditulis dua kali — sekali ke temp, sekali ke
 	// tujuannya. Ganti ke r.MultipartReader() yang mengalirkannya langsung kalau
 	// I/O disk jadi soal; harganya, urutan field dalam kiriman jadi penting.
-	if err := r.ParseMultipartForm(32 << 20); err != nil {
-		return httpx.BadRequest("The upload could not be read, or the file is too large.").WithCause(err)
+	if err := r.ParseMultipartForm(1 << 20); err != nil {
+		return uploadError(err)
 	}
 
 	file, header, err := r.FormFile("file")
@@ -191,6 +199,33 @@ func (h *ContentHandler) Archive(w http.ResponseWriter, r *http.Request) error {
 
 	httpx.OK(w, "Content archived.", archived)
 	return nil
+}
+
+// uploadError menggolongkan kegagalan membaca kiriman.
+//
+// Tiga sebab yang berbeda jauh tiba sebagai satu galat dari pustaka bawaan, dan
+// yang paling berbahaya adalah yang ketiga: **ruang penyimpanan servis habis.**
+//
+// Sebelum ini semuanya dijawab 400 "file is too large". Untuk disk yang penuh
+// itu menyesatkan dua kali — integrator mengecilkan videonya berulang kali
+// padahal tidak ada yang salah dengan videonya, dan pemantauan tidak pernah
+// melihat apa pun karena 4xx dianggap kesalahan pengirim. Yang sesungguhnya
+// perlu ditambah adalah disk.
+func uploadError(err error) error {
+	var tooBig *http.MaxBytesError
+	if errors.As(err, &tooBig) {
+		return httpx.BadRequest("The file is larger than the allowed limit.").WithCause(err)
+	}
+
+	// ENOSPC disk penuh, EDQUOT kuota habis, EFBIG batas ukuran berkas sistem.
+	// Ketiganya milik servis, bukan pengirim. Linux-only, dan servis ini memang
+	// cuma dijalankan di sana.
+	if errors.Is(err, syscall.ENOSPC) || errors.Is(err, syscall.EDQUOT) ||
+		errors.Is(err, syscall.EFBIG) {
+		return httpx.ServerError(err)
+	}
+
+	return httpx.BadRequest("The upload could not be read.").WithCause(err)
 }
 
 // parseTime membaca jadwal dari kiriman.

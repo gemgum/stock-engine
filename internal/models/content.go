@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 )
 
 // NewID menerbitkan penanda baru.
@@ -76,9 +77,16 @@ type Content struct {
 	// ditafsirkan servis — cuma disimpan dan ditampilkan kembali.
 	FailureReason *string `json:"failure_reason"`
 
-	ArchivedAt *Time  `json:"archived_at"`
-	UploadedBy string `json:"uploaded_by"`
-	CreatedAt  Time   `json:"created_at"`
+	ArchivedAt *Time `json:"archived_at"`
+
+	// FileRemovedAt terisi kalau berkasnya sudah dibuang sapuan retensi.
+	//
+	// Barisnya tetap — riwayat "konten ini tayang tanggal sekian" murah
+	// disimpan, yang mahal cuma videonya. Penanda ini yang membuat servis bisa
+	// menjawab jujur: berkasnya dibuang karena umur, bukan hilang karena rusak.
+	FileRemovedAt *Time  `json:"file_removed_at"`
+	UploadedBy    string `json:"uploaded_by"`
+	CreatedAt     Time   `json:"created_at"`
 }
 
 // NewContent adalah kiriman unggahan, setelah berkasnya selesai ditulis.
@@ -206,8 +214,31 @@ type ContentRepository interface {
 	// kontennya. False berarti syaratnya tidak terpenuhi — belum diclaim, atau
 	// diclaim aplikasi lain.
 	SetPublication(ctx context.Context, id, appID string, status Status, reason *string, at Time) (bool, error)
-	SetSchedule(ctx context.Context, id string, at Time) error
+	// SetSchedule menolak konten yang sudah tayang. False berarti tidak ada
+	// baris yang berubah — kontennya tidak ada, atau sudah tayang.
+	SetSchedule(ctx context.Context, id string, at Time) (bool, error)
 	Archive(ctx context.Context, id string, at Time) error
+
+	// ExpiredFiles menyebut konten yang berkasnya sudah boleh dibuang: sudah
+	// selesai — tayang atau dibatalkan — dan selesainya lebih lama dari `before`.
+	//
+	// Yang belum pernah tayang tidak pernah ikut, berapa lama pun sudah
+	// diunggah. Stok yang menunggu gilirannya bukan sampah.
+	ExpiredFiles(ctx context.Context, before Time, limit int) ([]Content, error)
+
+	// ReleaseStuckClaims mengembalikan konten yang diclaim lalu tidak pernah
+	// dilaporkan ke antrean.
+	//
+	// Jadwalnya tidak diubah: jadwal yang sudah lewat berarti ia langsung masuk
+	// antrean lagi, dan itu memang yang diinginkan — kontennya memang terlambat.
+	ReleaseStuckClaims(ctx context.Context, before Time) (int, error)
+
+	// MarkFileRemoved dipanggil **sesudah** berkasnya benar-benar dibuang.
+	//
+	// Urutannya tidak boleh dibalik: yang ditandai lebih dulu lalu gagal
+	// menghapus akan meninggalkan berkas yang tidak akan pernah dilirik sapuan
+	// berikutnya.
+	MarkFileRemoved(ctx context.Context, id string, at Time) error
 }
 
 // Files adalah yang perlu diketahui service tentang penyimpanan berkas.
@@ -219,4 +250,9 @@ type Files interface {
 	Save(id string, src io.Reader) (size int64, checksum string, err error)
 	Path(id string) string
 	Remove(id string) error
+
+	// RemoveStale membuang berkas separuh yang ditinggalkan servis yang mati
+	// mendadak. Tidak punya baris di database, jadi tidak ada sapuan lain yang
+	// bisa menemukannya.
+	RemoveStale(olderThan time.Duration) (int, error)
 }

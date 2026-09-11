@@ -13,15 +13,27 @@ import (
 //go:embed *.sql
 var files embed.FS
 
+// Migration adalah satu berkas SQL beserta namanya.
+//
+// Namanya ikut dibawa karena itu yang dicatat sebagai "sudah pernah
+// dijalankan". Sebelum ada catatan itu, seluruh migrasi diputar ulang tiap
+// servis menyala — aman selama isinya `IF NOT EXISTS`, dan berhenti aman begitu
+// ada `ALTER TABLE` yang pertama.
+type Migration struct {
+	Name string
+	SQL  string
+}
+
 // All mengembalikan seluruh migrasi, berurutan menurut nama berkasnya.
 //
-// ponytail: belum ada tabel versi. Seluruh isinya IF NOT EXISTS, jadi aman
-// diputar ulang berapa kali pun. Tambahkan tabel versi begitu ada migrasi yang
-// tidak idempoten — ALTER TABLE yang pertama akan jadi tandanya.
-func All() (string, error) {
+// Urutannya datang dari nama berkas, jadi penomorannya bukan hiasan: `0002_`
+// wajib jalan sesudah `0001_`. Berkas baru selalu diberi nomor lebih besar dari
+// yang sudah pernah dijalankan — yang disisipkan di tengah tidak akan pernah
+// ikut, karena yang sesudahnya sudah tercatat selesai.
+func All() ([]Migration, error) {
 	entries, err := files.ReadDir(".")
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
 	var names []string
@@ -32,14 +44,13 @@ func All() (string, error) {
 	}
 	sort.Strings(names)
 
-	var b strings.Builder
+	out := make([]Migration, 0, len(names))
 	for _, name := range names {
 		content, err := files.ReadFile(name)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
-		b.Write(content)
-		b.WriteString(";\n")
+		out = append(out, Migration{Name: name, SQL: string(content)})
 	}
-	return b.String(), nil
+	return out, nil
 }

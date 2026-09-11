@@ -16,6 +16,7 @@ server. Kliennya aplikasi milik developer lain.
 |---|---|
 | Backend | **Go, pustaka bawaan + `net/http`. Tanpa framework** |
 | Database | **SQLite** (`modernc.org/sqlite`, Go murni). Alasannya pencadangan, bukan beban — `ARCHITECTURE.md` §6 |
+| Migrasi | Berkas SQL di `migrations/`, ikut masuk binary, dicatat di `schema_migrations`. Nomor berkas menentukan urutan |
 | Penyimpanan berkas | Disk servis, satu folder bersama databasenya |
 | Auth | Kunci API per aplikasi, disimpan ter-hash. Kunci induk dari environment |
 | Kepemilikan konten | **Satu gudang bersama.** Semua aplikasi melihat isi yang sama |
@@ -98,9 +99,28 @@ lengkap di atas SQLite sungguhan, seperti `internal/api/api_test.go`.
   biasanya ditolak lagi kalau dikirim ulang apa adanya, dan antrean yang mengisi
   ulang dirinya sendiri akan mencoba selamanya tanpa ada yang tahu. Yang
   mengembalikannya manusia, lewat `/schedule`.
+- **Pembatas laju harus melihat pemanggil yang sebenarnya.** Di balik nginx,
+  `RemoteAddr` selalu `127.0.0.1` — tanpa penanganan khusus, seluruh integrator
+  berbagi satu jatah dan satu aplikasi yang beruntun mematikan yang lain. Header
+  alamat asli **cuma dipercaya dari jaringan di `TRUSTED_PROXIES`**; dari luar
+  itu siapa pun bisa mengarangnya.
+- **Tiga pekerjaan jalan sendiri, dan semuanya harus aman diulang.** Claim yang
+  ditinggalkan dilepas setelah 2 jam (tiap 5 menit); berkas konten yang sudah
+  selesai dibuang setelah 90 hari (tiap 24 jam); potongan unggahan yang
+  ditinggalkan servis yang mati mendadak dibuang setelah 6 jam — yang terakhir
+  **tidak** ikut dimatikan `RETENTION_DAYS=0`, karena itu sampah, bukan
+  kebijakan penyimpanan. Aturannya di `ARCHITECTURE.md` §7. Yang paling mudah terbalik: **berkas dibuang dulu,
+  penandanya belakangan** — dibalik, berkas yang gagal dihapus akan bertanda
+  "sudah dibuang" dan tidak akan pernah dilirik lagi.
+- **Ambang lepas claim jangan dipendekkan tanpa alasan.** Integrator yang masih
+  mengunggah video besar di jaringan pelan akan direbut aplikasi lain, dan
+  kontennya tayang dua kali — persis yang seluruh mekanisme claim ini cegah.
+- **Stok yang belum pernah tayang tidak pernah disapu**, berapa lama pun sudah
+  diunggah. Yang menunggu gilirannya bukan sampah.
 - **Servis ini tidak pernah menghapus apa pun.** Konten dinonaktifkan lewat
   `/archival`, aplikasi dicabut lewat `/revocation`, dan riwayatnya tetap
-  terbaca. Tidak ada `DELETE`, dan seluruh perubahan pakai `POST`.
+  terbaca. Tidak ada `DELETE`, dan seluruh perubahan pakai `POST`. Yang benar-
+  benar dibuang cuma berkas yang lewat umurnya — barisnya tetap.
 - **Kunci cuma terlihat sekali.** Yang disimpan hashnya. Database yang bocor
   tidak berisi satu pun kunci yang bisa dipakai.
 - **Galat aslinya tidak pernah keluar.** Nama tabel, path berkas, bunyi

@@ -13,7 +13,7 @@ type Content struct{}
 
 const contentColumns = `id, filename, mime, size, checksum, caption, platform,
 	scheduled_at, status, claimed_by, claimed_at, published_at, failure_reason,
-	archived_at, uploaded_by, created_at`
+	archived_at, file_removed_at, uploaded_by, created_at`
 
 func scanContent(row Scanner) (models.Content, error) {
 	var (
@@ -21,12 +21,13 @@ func scanContent(row Scanner) (models.Content, error) {
 		scheduledAt, createdAt             string
 		claimedBy, failureReason           sql.NullString
 		claimedAt, publishedAt, archivedAt sql.NullString
+		fileRemovedAt                      sql.NullString
 		err                                error
 	)
 
 	if err = row.Scan(&c.ID, &c.Filename, &c.Mime, &c.Size, &c.Checksum, &c.Caption,
 		&c.Platform, &scheduledAt, &c.Status, &claimedBy, &claimedAt, &publishedAt,
-		&failureReason, &archivedAt, &c.UploadedBy, &createdAt); err != nil {
+		&failureReason, &archivedAt, &fileRemovedAt, &c.UploadedBy, &createdAt); err != nil {
 		return c, err
 	}
 
@@ -43,6 +44,9 @@ func scanContent(row Scanner) (models.Content, error) {
 		return c, err
 	}
 	if c.ArchivedAt, err = ReadTimePtr(archivedAt); err != nil {
+		return c, err
+	}
+	if c.FileRemovedAt, err = ReadTimePtr(fileRemovedAt); err != nil {
 		return c, err
 	}
 
@@ -183,20 +187,24 @@ func (Content) SetPublication(ctx context.Context, id, appID string, status mode
 // bersamaan: yang memindahkan jadwal konten gagal selalu bermaksud
 // mencobanya lagi. Alamat terpisah untuk "kembalikan ke antrean" berarti dua
 // panggilan yang tidak pernah dipakai sendiri-sendiri.
-func (Content) SetSchedule(ctx context.Context, id string, at models.Time) error {
+//
+// Mengembalikan false kalau tidak ada yang berubah; yang memilih kalimatnya
+// service, karena ia yang bisa melihat kenapa. Nol baris di sini punya dua sebab
+// yang berbeda jauh — kontennya tidak ada, atau sudah tayang — dan menjawab
+// keduanya dengan kalimat yang sama membuat yang salah ketik id mencari-cari
+// konten yang tidak pernah ada.
+func (Content) SetSchedule(ctx context.Context, id string, at models.Time) (bool, error) {
+	// Syarat ketiga: berkasnya masih ada. Konten yang berkasnya sudah dibuang
+	// sapuan retensi tidak boleh kembali ke antrean — integrator akan
+	// mengambilnya, gagal mengunduh, dan yang terlihat cuma kegagalan berulang
+	// tanpa sebab yang jelas.
 	const q = `UPDATE contents
 		SET scheduled_at = ?, status = ?, claimed_by = NULL, claimed_at = NULL,
 		    failure_reason = NULL
-		WHERE id = ? AND status != ?`
+		WHERE id = ? AND status != ? AND file_removed_at IS NULL`
 
 	changed, err := Exec(ctx, q, Stamp(at), models.StatusScheduled, id, models.StatusPublished)
-	if err != nil {
-		return err
-	}
-	if changed == 0 {
-		return httpx.BadRequest("Published content cannot be rescheduled.")
-	}
-	return nil
+	return changed > 0, err
 }
 
 // Archive mengeluarkan konten dari antrean tanpa menghapusnya.
@@ -214,4 +222,45 @@ func (Content) Archive(ctx context.Context, id string, at models.Time) error {
 		return httpx.NotFound("The requested item does not exist.")
 	}
 	return nil
+}
+
+// ExpiredFiles menyebut konten yang berkasnya sudah boleh dibuang.
+//
+// "Selesainya" diambil dari waktu tayang atau waktu diarsipkan, bukan waktu
+// unggah: konten yang diunggah setahun lalu tapi baru tayang kemarin masih
+// muda umurnya. COALESCE memilih yang terisi — sebuah baris tidak pernah punya
+// keduanya sekaligus.
+func (Content) ExpiredFiles(ctx context.Context, before models.Time, limit int) ([]models.Content, error) {
+	const q = `SELECT ` + contentColumns + ` FROM contents
+		WHERE status IN (?, ?)
+		  AND file_removed_at IS NULL
+		  AND COALESCE(published_at, archived_at) <= ?
+		ORDER BY COALESCE(published_at, archived_at) ASC
+		LIMIT ?`
+
+	return Many(ctx, scanContent, q,
+		models.StatusPublished, models.StatusArchived, Stamp(before), limit)
+}
+
+func (Content) MarkFileRemoved(ctx context.Context, id string, at models.Time) error {
+	_, err := Exec(ctx, `UPDATE contents SET file_removed_at = ? WHERE id = ?`, Stamp(at), id)
+	return err
+}
+
+// ReleaseStuckClaims mengembalikan claim yang tidak pernah dilaporkan.
+//
+// Satu perintah, tanpa membaca dulu: yang dicari justru baris yang tidak ada
+// yang mengurus, dan memeriksanya satu per satu cuma menambah kesempatan
+// integrator yang sebenarnya masih hidup melapor di sela-selanya.
+//
+// `failure_reason` sengaja tidak diisi. Yang terjadi bukan kegagalan yang
+// dilaporkan siapa pun — tidak ada yang tahu apa yang terjadi di sana, dan
+// mengarangnya akan tercampur dengan alasan gagal yang sungguhan.
+func (Content) ReleaseStuckClaims(ctx context.Context, before models.Time) (int, error) {
+	const q = `UPDATE contents
+		SET status = ?, claimed_by = NULL, claimed_at = NULL
+		WHERE status = ? AND claimed_at <= ?`
+
+	changed, err := Exec(ctx, q, models.StatusScheduled, models.StatusClaimed, Stamp(before))
+	return int(changed), err
 }

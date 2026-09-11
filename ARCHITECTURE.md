@@ -84,8 +84,9 @@ Larangannya sama dengan YourChoice, dan tidak dinegosiasi ulang:
   `services/`.
 - **Handler tidak tahu alamatnya sendiri.** Yang mendaftarkan `routes/`.
 - **`pkg` tidak pernah mengimpor `internal`.** Angka yang bersifat kebijakan —
-  berapa permintaan per menit, berapa besar berkas boleh diunggah — tinggal di
-  `internal/config`, dan `pkg` menerimanya sebagai parameter.
+  berapa permintaan per menit, berapa besar berkas boleh diunggah, jaringan mana
+  yang dipercaya sebagai proxy — tinggal di `internal/config`, dan `pkg`
+  menerimanya sebagai parameter.
 
 ### Dua folder yang berbeda isi dari YourChoice
 
@@ -115,7 +116,7 @@ dibuat saat benar-benar ada dua bentuk yang berbeda.
 | Row Level Security | Gudangnya satu: semua aplikasi integrator melihat konten yang sama, jadi tidak ada yang perlu disaring per pemanggil. Ditambah SQLite memang tidak punya RLS. **Kalau suatu hari tiap integrator cuma boleh melihat kontennya sendiri, itu kolom `app_id` di semua tabel — dan keputusan yang jauh lebih murah diambil sekarang daripada saat datanya sudah banyak** |
 | `database.Run` yang menurunkan peran | Ikut hilang bersama RLS. Folder `database/` tetap ada — koneksi dan transaksi tetap perlu — tapi isinya lebih tipis, dan `Run` tidak lagi menerima id pemanggil |
 | Fungsi PL/pgSQL | Tidak ada `clock()` atau yang setara — SQLite tidak punya padanannya. Aturan main tinggal di `services/`, tempat yang wajar untuk aturan yang tidak menopang anti-kecurangan |
-| Pekerjaan yang jalan sendiri | Belum ada satu pun. Yang pertama kemungkinan besar sapuan berkas arsip saat disk menipis; tempatnya `internal/api/`, dan aturannya tiga: lewat service, berhenti kalau context dibatalkan, aman diulang berapa kali pun |
+| ~~Pekerjaan yang jalan sendiri~~ | **Sudah ada dua**, di `internal/api/janitor.go` — lihat §7 |
 
 Yang **tetap** dibawa walau kelihatan bisa dibuang: `problem/`. Isinya lebih
 tipis karena tidak ada galat PL/pgSQL buatan sendiri, tapi penerjemah penolakan
@@ -240,7 +241,8 @@ ketahuan dari pembaca.
 
 ## 5. Bentuk jawaban
 
-Setiap balasan, berhasil maupun gagal, punya empat field yang sama:
+Setiap balasan yang keluar dari handler, berhasil maupun gagal, punya empat
+field yang sama:
 
 ```json
 { "code": 200, "status": "success", "message": "Contents loaded.", "data": [] }
@@ -339,13 +341,99 @@ dijalankan saat servis start. Langkah migrasi terpisah adalah langkah yang bisa
 terlupa, dan skema yang tertinggal satu kolom gagalnya tidak selalu langsung
 terlihat.
 
-Belum ada tabel versi: seluruh isinya `IF NOT EXISTS`, jadi aman diputar ulang
-berapa kali pun. **`ALTER TABLE` yang pertama adalah tanda bahwa tabel versi
-sudah harus ada.**
+Migrasi yang sudah pernah dijalankan dicatat di `schema_migrations`, dan tiap
+berkas jalan di dalam satu transaksi bersama catatannya — yang mati di tengah
+tidak meninggalkan skema separuh yang dianggap selesai.
+
+Catatan itu dulu tidak ada: seluruh isinya `IF NOT EXISTS`, jadi aman diputar
+ulang berapa kali pun, dan yang tertulis di sini adalah **"`ALTER TABLE` yang
+pertama adalah tanda bahwa tabel versi sudah harus ada."** `0002` membawa
+`ALTER TABLE`, jadi tabelnya dibuat saat itu juga. Database yang sudah berisi
+ikut naik dengan sendirinya: `0001` diputar ulang tanpa efek, `0002` jalan sekali.
+
+**Nomor berkas menentukan urutan.** Yang baru selalu diberi nomor lebih besar
+dari yang sudah pernah dijalankan — yang disisipkan di tengah tidak akan pernah
+ikut, karena yang sesudahnya sudah tercatat selesai.
 
 ---
 
-## 7. Penamaan
+## 7. Pekerjaan yang jalan sendiri
+
+Dua, dan keduanya tinggal di `internal/api/janitor.go`. Di `api/` karena yang
+dibutuhkannya sama dengan yang dibutuhkan `Build` — tahu service mana memakai
+repository mana — dan itu memang pekerjaan folder itu. `cmd/api` yang
+menyalakannya dan yang memegang tombol matinya.
+
+| Pekerjaan | Irama | Ambang |
+|---|---|---|
+| Melepas claim yang ditinggalkan | tiap 5 menit | `CLAIM_TIMEOUT_HOURS`, bawaan 2 jam |
+| Membuang berkas yang lewat umurnya | tiap 24 jam | `RETENTION_DAYS`, bawaan 90 hari |
+| Membuang potongan unggahan yang ditinggalkan | tiap 24 jam | 6 jam, tetap |
+
+**Iramanya berbeda karena ambangnya berbeda satuan.** Berkas yang lewat umurnya
+beberapa jam lebih lama tidak merugikan siapa pun. Claim yang tersangkut jam
+sembilan pagi, kalau baru dilepas besok, kembali ke antrean jauh sesudah
+jadwalnya tidak ada artinya lagi.
+
+Aturannya tiga, dan berlaku untuk yang berikutnya kalau memang ada:
+
+- **Lewat service, bukan langsung ke database.** Keduanya memanggil
+  `ContentService`, jadi galatnya tercatat dengan nama operasinya seperti
+  permintaan HTTP mana pun.
+- **Berhenti kalau contextnya dibatalkan**, dan tidak ditunggu saat servis
+  menutup. Yang terpotong di tengah aman diulang, bukan harus diselesaikan.
+- **Aman diulang berapa kali pun.** Keduanya jalan sekali saat servis menyala,
+  dan servis bisa dinyalakan ulang lima kali dalam sejam.
+
+### Urutan yang tidak boleh dibalik saat membuang berkas
+
+Berkas dulu, penandanya belakangan. Kalau servis mati di antara keduanya,
+berkasnya hilang tapi belum bertanda — sapuan berikutnya mencoba menghapus
+berkas yang memang sudah tidak ada (bukan galat) lalu menandainya. Dibalik,
+berkas yang gagal dihapus akan bertanda "sudah dibuang" dan tidak akan pernah
+dilirik lagi.
+
+### Kenapa sapuan berkas sementara terpisah
+
+Potongan unggahan `upload-*` tertinggal kalau servis mati **mendadak** di tengah
+penulisan. Ia tidak punya baris di database, jadi sapuan retensi — yang bekerja
+dari daftar baris — tidak akan pernah menemukannya. Satu-satunya yang
+mengenalinya adalah nama berkasnya sendiri.
+
+Sapuan itu **tidak ikut dimatikan `RETENTION_DAYS=0`**, dan pemisahan itu
+disengaja: yang memilih menyimpan kontennya selamanya tetap tidak ingin
+menyimpan potongan unggahan yang gagal. Satu kebijakan penyimpanan, satu
+pembuangan sampah — bukan hal yang sama.
+
+Ambangnya 6 jam dan longgar dengan sengaja. Unggahan 200MB di jaringan pelan
+bisa memakan puluhan menit, dan membuang berkas milik unggahan yang masih
+berjalan jauh lebih buruk daripada membiarkan sampah menginap setengah hari.
+
+### Batas per kueri, bukan batas per hari
+
+Sapuan mengambil 200 baris sekali kueri supaya satu transaksi tidak menahan
+kunci tulis berlama-lama — SQLite cuma punya satu penulis, dan unggahan yang
+datang saat sapuan berjalan harus tetap terlayani.
+
+Tapi satu sapuan **mengulang batch sampai habis.** Kalau tidak, 200 menjadi
+batas per hari: gudang berisi sepuluh ribu berkas kedaluwarsa baru bersih
+setelah lima puluh hari — dan justru gudang seperti itulah yang membuat retensi
+dinyalakan.
+
+Perulangannya berhenti begitu ada berkas yang gagal dihapus. Baris yang gagal
+tidak bertanda, jadi kueri berikutnya mengembalikannya lagi — tanpa penjagaan
+itu sapuannya berputar di baris yang sama selamanya.
+
+### Kenapa `file_removed_at` kolom sendiri
+
+Bisa saja disimpulkan dari "berkasnya tidak ada di disk". Tapi tanpa penanda,
+berkas yang hilang karena disapu tidak bisa dibedakan dari berkas yang hilang
+karena kerusakan — dan keduanya butuh jawaban yang berbeda: yang pertama normal
+dan sudah diberitahukan, yang kedua harus diperiksa orang.
+
+---
+
+## 8. Penamaan
 
 Sudah ada di `CLAUDE.md`, diulang di sini karena ini tempat orang mencarinya:
 
@@ -360,13 +448,14 @@ Sudah ada di `CLAUDE.md`, diulang di sini karena ini tempat orang mencarinya:
 
 ---
 
-## 8. Yang belum ada, dan itu disengaja
+## 9. Yang belum ada, dan itu disengaja
 
 | Belum ada | Kapan layak ditambah |
 |---|---|
 | `dto/` | Saat pengunggah dan pengambil konten benar-benar membaca bentuk yang berbeda |
 | OpenAPI sebagai kontrak | Saat integrator di luar kendalimu mulai menulis kliennya. Sementara ini koleksi Postman di `api/` yang menjelaskan |
-| Sapuan berkas arsip | Saat `storage/` menipis. Yang diarsipkan sekarang tetap memakan disk, dan itu pilihan — arsip sering diubah pikiran, berkas yang terhapus tidak bisa dikembalikan |
+| Peringatan disk menipis | Saat pernah kejadian. Retensi membatasi konten lama, bukan kecepatan konten baru masuk — disk masih bisa habis, dan itu urusan pemantauan VPS |
+| Penghitung berapa kali satu konten pernah dilepas | Saat ada integrator yang selalu mati di tempat yang sama. Sekarang cuma tercatat di log |
 | Pagination keyset | Saat daftarnya tumbuh sampai halaman belakang terasa lambat. Sekarang offset |
 | Pembatas laju terdistribusi | Bersamaan dengan pindah dari SQLite — lihat §6 |
 

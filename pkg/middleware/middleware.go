@@ -7,7 +7,9 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/gemgum/stock-engine/pkg/httpx"
@@ -106,10 +108,16 @@ func Log(logger *slog.Logger) Middleware {
 //
 // Dihitung per alamat IP, bukan per kunci API: yang menebak-nebak kunci justru
 // belum punya kunci yang sah.
-func RateLimit(limiter *ratelimit.Limiter, logger *slog.Logger) Middleware {
+//
+// trusted adalah jaringan tempat proxy berada — biasanya cuma loopback, karena
+// nginx berjalan di mesin yang sama. Daftarnya keputusan aplikasi, jadi datang
+// sebagai parameter dari internal/config.
+func RateLimit(limiter *ratelimit.Limiter, trusted []netip.Prefix,
+	logger *slog.Logger) Middleware {
+
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if !limiter.Allow(callerIP(r)) {
+			if !limiter.Allow(ClientIP(r, trusted)) {
 				httpx.Fail(w, logger, httpx.TooManyRequests())
 				return
 			}
@@ -118,10 +126,72 @@ func RateLimit(limiter *ratelimit.Limiter, logger *slog.Logger) Middleware {
 	}
 }
 
-func callerIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
+// ClientIP menyebut siapa yang sebenarnya memanggil.
+//
+// Tanpa ini, servis di balik nginx melihat `127.0.0.1` untuk **semua**
+// permintaan — dan seluruh integrator berbagi satu jatah. Satu aplikasi yang
+// menembak beruntun mematikan yang lain, dan pembatasnya berhenti membatasi apa
+// pun kecuali proxy-nya sendiri.
+//
+// Header alamat asli **cuma dipercaya kalau permintaannya datang dari proxy yang
+// dipercaya.** Kalau tidak, siapa pun tinggal memasang `X-Real-IP` karangan
+// sendiri dan mendapat jatah tak terbatas — pembatas yang bisa dipalsukan lebih
+// buruk daripada tidak ada, karena ia menimbulkan rasa aman yang keliru.
+func ClientIP(r *http.Request, trusted []netip.Prefix) string {
+	remote := hostOf(r.RemoteAddr)
+
+	alamat, err := netip.ParseAddr(remote)
+	if err != nil || !dipercaya(alamat, trusted) {
+		return remote
+	}
+
+	// nginx memasangnya dari $remote_addr, jadi isinya pemanggil yang sebenarnya.
+	if ip := bersih(r.Header.Get("X-Real-IP")); ip != "" {
+		return ip
+	}
+
+	// Sebagian proxy cuma memasang X-Forwarded-For. Isinya berurutan dari
+	// pemanggil asli ke proxy terakhir, jadi yang dicari entri paling kanan yang
+	// **bukan** proxy kita — itu yang menyerahkan permintaannya kepada kita.
+	maju := strings.Split(r.Header.Get("X-Forwarded-For"), ",")
+	for i := len(maju) - 1; i >= 0; i-- {
+		ip := bersih(maju[i])
+		if ip == "" {
+			continue
+		}
+		if alamat, err := netip.ParseAddr(ip); err == nil && dipercaya(alamat, trusted) {
+			continue
+		}
+		return ip
+	}
+
+	return remote
+}
+
+func bersih(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if _, err := netip.ParseAddr(raw); err != nil {
+		return ""
+	}
+	return raw
+}
+
+func dipercaya(alamat netip.Addr, trusted []netip.Prefix) bool {
+	for _, jaringan := range trusted {
+		if jaringan.Contains(alamat) {
+			return true
+		}
+	}
+	return false
+}
+
+func hostOf(remoteAddr string) string {
+	host, _, err := net.SplitHostPort(remoteAddr)
 	if err != nil {
-		return r.RemoteAddr
+		return remoteAddr
 	}
 	return host
 }

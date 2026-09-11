@@ -31,6 +31,26 @@ Yang dibuat sendiri saat pertama jalan: folder `storage/`, berkas
 | `make build` | rakit binary untuk VPS |
 | `make backup` | salin seluruh isi `storage/` |
 
+### Pengaturan
+
+Semuanya lewat environment; `.env` cuma dibaca kalau ada, dan **yang sudah ada di
+environment selalu menang.** Itu yang membuat berkas `.env` yang tidak sengaja
+ikut ke server tidak bisa diam-diam mengembalikan pengaturan lama.
+
+| Variabel | Bawaan | Guna |
+|---|---|---|
+| `ADMIN_KEY` | — **wajib** | kunci induk, minimal 32 karakter. Servis menolak menyala tanpa ini |
+| `STORAGE_DIR` | `storage` | satu folder berisi `stock.db` dan `files/` |
+| `ADDRESS` | `:8080` | di server isi `127.0.0.1:8099` supaya cuma nginx yang bisa masuk |
+| `MAX_UPLOAD_MB` | `200` | batas satu berkas |
+| `RETENTION_DAYS` | `90` | umur berkas konten yang sudah selesai. `0` = jangan pernah dibuang |
+| `CLAIM_TIMEOUT_HOURS` | `2` | ambang melepas claim yang ditinggalkan. `0` = jangan pernah dilepas |
+| `TRUSTED_PROXIES` | `127.0.0.0/8,::1/128` | dari mana header alamat asli dipercaya |
+| `ALLOWED_ORIGINS` | `http://localhost:3000` | alamat panel web yang boleh memanggil |
+
+Kalau `ADMIN_KEY` kurang dari 32 karakter, servis **berhenti saat start** dan
+menyebut namanya — bukan jalan setengah lalu menolak permintaan di lapangan.
+
 ---
 
 ## Kunci
@@ -119,6 +139,55 @@ yang tayang dua kali. `overdue` pertanyaan manusia — "kenapa konten ini tidak
 muncul?" — jadi yang macet di tangan integrator dan yang gagal justru ikut
 kelihatan.
 
+### Bentuk satu konten
+
+```json
+{
+  "id": "c6afafa86fe41cb916d82bc4",
+  "filename": "poster.jpg",
+  "mime": "image/jpeg",
+  "size": 184320,
+  "checksum": "ad0df4bb262e87b5...",
+  "caption": "Diskon akhir pekan",
+  "platform": "instagram",
+  "scheduled_at": "2026-09-13 09:00:00",
+  "status": "scheduled",
+  "claimed_by": null,
+  "claimed_at": null,
+  "published_at": null,
+  "failure_reason": null,
+  "archived_at": null,
+  "file_removed_at": null,
+  "uploaded_by": "aecbce013903ed3cd3e7a932",
+  "created_at": "2026-09-11 22:37:42"
+}
+```
+
+| Field | Isinya |
+|---|---|
+| `id` | penanda acak, bukan nomor urut — dipakai di semua alamat |
+| `filename` · `mime` · `size` | keterangan berkasnya. Nama aslinya tidak dipakai sebagai nama berkas di disk |
+| `checksum` | SHA-256 berkasnya. Cocokkan setelah mengunduh kalau kamu tidak mau mempercayai jaringan |
+| `caption` · `platform` | teks bebas yang kamu isi saat mengunggah. Servis tidak menafsirkannya |
+| `status` | lihat **Perjalanan satu konten** di bawah |
+| `claimed_by` · `claimed_at` | aplikasi yang sedang memegangnya |
+| `published_at` | terisi saat dilaporkan tayang |
+| `failure_reason` | alasan yang **dilaporkan integrator**, bukan karangan servis. Kosong kalau kegagalannya tidak pernah dilaporkan siapa pun |
+| `archived_at` | terisi saat dibatalkan lewat `/archival` |
+| `file_removed_at` | terisi kalau berkasnya sudah dibuang karena umur. Barisnya tetap; berkasnya tidak bisa diunduh lagi |
+| `uploaded_by` | aplikasi yang mengunggahnya. Catatan saja — gudangnya satu, semua aplikasi melihat semuanya |
+
+### Mengunggah
+
+Multipart, bukan JSON berisi base64: base64 membengkakkan video 200MB jadi 267MB.
+
+| Field | Wajib | Isinya |
+|---|---|---|
+| `file` | ya | berkasnya |
+| `scheduled_at` | ya | `YYYY-MM-DD HH:MM:SS`, waktu server |
+| `caption` | tidak | teks bebas |
+| `platform` | tidak | teks bebas, dipakai menyaring `?platform=` |
+
 ### Waktu
 
 Satu bentuk saja, dan itu **waktu server**:
@@ -157,6 +226,10 @@ curl -X POST -H "$K" -H 'Content-Type: application/json' \
   -d '{"published":true}' localhost:8080/v1/contents/<id>/publication
 ```
 
+Koleksi Postman siap pakai ada di `api/stock-engine.postman_collection.json` —
+import, lalu isi `base_url`, `admin_key`, dan `app_key` di tab **Variables**.
+Folder **Alur integrator** berisi empat langkah di atas, berurutan.
+
 **Langkah 2 bukan formalitas.** Tanpa claim, dua aplikasi yang menanyakan
 antrean di detik yang sama akan memposting konten yang sama, dan tidak ada galat
 yang muncul — yang melapor pembacanya.
@@ -190,6 +263,26 @@ kiriman yang sama akan gagal lagi.
 
 ---
 
+## Batas yang perlu diketahui integrator
+
+| Batas | Angkanya | Kalau dilewati |
+|---|---|---|
+| Permintaan per menit | 60, **per alamat IP** | `429 too_many_requests` — tunggu, jangan ubah apa pun |
+| Ukuran satu berkas | `MAX_UPLOAD_MB`, bawaan 200MB | `400` dari servis, atau `413` dari nginx kalau batasnya di sana lebih kecil |
+| Isi satu halaman daftar | `limit` maksimal 200 | dibetulkan diam-diam jadi 50, dan nilai betulannya dipantulkan |
+| Badan JSON | 1MB | `400 invalid_input` |
+
+Jatah 60/menit dihitung **per pemanggil**, bukan per kunci. Kalau engine ini di
+balik nginx, nginx wajib meneruskan alamat asli (`X-Real-IP`) — tanpa itu semua
+integrator berbagi satu jatah, dan satu aplikasi yang beruntun mematikan yang
+lain.
+
+Untuk `?scope=due` yang dipanggil berkala, sekali tiap beberapa menit sudah
+cukup. Menanyakan tiap detik tidak membuat konten tayang lebih tepat waktu —
+jadwalnya tetap jadwal.
+
+---
+
 ## Perjalanan satu konten
 
 ```
@@ -202,6 +295,47 @@ Yang gagal **tidak** kembali sendiri ke antrean. Konten yang ditolak platform
 biasanya ditolak lagi kalau dikirim ulang apa adanya, dan antrean yang mengisi
 ulang dirinya sendiri akan mencoba selamanya tanpa ada yang tahu. Yang
 mengembalikannya manusia, lewat `/schedule`.
+
+---
+
+## Tiga pekerjaan yang jalan sendiri
+
+Tidak ada alamat untuk keduanya, dan tidak ada tombol. Kalau menghapus dan
+membereskan harus diingat manusia, disknya tetap penuh dan kontennya tetap
+tersangkut.
+
+**Claim yang ditinggalkan dilepas** setelah `CLAIM_TIMEOUT_HOURS` (bawaan 2
+jam), diperiksa tiap 5 menit. Integrator yang mati sesudah mengclaim membuat
+kontennya diam di `claimed` selamanya — tidak pernah tayang, dan tidak pernah
+muncul lagi di antrean kerja. Jadwalnya tidak diubah, jadi begitu dilepas ia
+langsung masuk antrean lagi.
+
+Ambangnya jangan dipendekkan tanpa alasan: integrator yang **masih** mengunggah
+video besar di jaringan pelan akan direbut aplikasi lain, dan kontennya tayang
+dua kali.
+
+**Potongan unggahan yang ditinggalkan dibuang** setelah 6 jam, sekali sehari.
+Servis yang mati **mendadak** — OOM, crash, listrik padam — meninggalkan berkas
+separuh yang tidak punya baris di database; tidak ada sapuan lain yang bisa
+menemukannya. Berhenti normal tidak menghasilkan ini. Sapuan ini **tidak** ikut
+dimatikan `RETENTION_DAYS=0`: itu sampah, bukan kebijakan penyimpanan.
+
+**Berkas yang sudah selesai dibuang** setelah `RETENTION_DAYS` (bawaan 90 hari),
+diperiksa sekali sehari. Yang dibuang cuma berkasnya:
+
+```
+published / archived  ──lewat 90 hari──→  berkas dibuang, baris tetap
+```
+
+Riwayatnya tetap terbaca, dengan `file_removed_at` terisi. Mengunduhnya dijawab
+`404` yang menyebut retensi, dan menjadwalkannya ulang ditolak — kalau lolos, ia
+masuk antrean lagi lalu gagal diunduh selamanya.
+
+**Stok yang belum pernah tayang tidak pernah disapu**, berapa lama pun sudah
+diunggah.
+
+Keduanya bisa dimatikan dengan mengisi `0`, dan keduanya jalan sekali saat
+servis menyala.
 
 ---
 
@@ -226,9 +360,74 @@ Taruh di belakang nginx atau caddy untuk TLS, dan **naikkan batas ukuran badan
 request di sana** — bawaan nginx 1MB, dan unggahan video akan ditolak sebelum
 sampai ke servis ini.
 
+**nginx wajib meneruskan alamat asli pemanggil** (`proxy_set_header X-Real-IP
+$remote_addr;`). Tanpa itu servis melihat `127.0.0.1` untuk semua permintaan,
+dan seluruh integrator berbagi satu jatah pembatas laju — satu aplikasi yang
+menembak beruntun mematikan yang lain.
+
 **Pencadangan bukan opsional, dan bukan cuma databasenya.** Database yang utuh
 tanpa berkasnya adalah daftar konten yang semuanya rusak. `make backup` menyalin
-keduanya sekaligus; jalankan lewat cron.
+keduanya sekaligus; jalankan lewat cron:
+
+```
+0 2 * * * STORAGE_DIR=/var/lib/stock-engine BACKUP_DIR=/var/backups/stock-engine bash /opt/stock-engine/ops/backup.sh >> /var/log/stock-engine-backup.log 2>&1
+```
+
+Memulihkannya — **servis harus dimatikan dulu**:
+
+```bash
+systemctl stop stock-engine
+STORAGE_DIR=/var/lib/stock-engine bash ops/restore.sh /var/backups/stock-engine/20260911T190608Z
+systemctl start stock-engine
+```
+
+Yang ada sekarang tidak ditimpa, tapi dipindahkan ke `storage.sebelum-restore-…`
+— restore yang ternyata salah pilih cadangan masih bisa dibatalkan.
+
+Cadangan yang belum pernah dicoba bukan cadangan. Dan cadangan di disk yang sama
+dengan aslinya juga bukan: kalau VPS-nya hilang, keduanya hilang bersamaan.
+
+---
+
+## Kalau ada yang salah
+
+Bentuk jawabannya sendiri sudah menyebut salahnya di mana:
+
+- **teks polos** `404 page not found` → alamatnya salah ketik
+- **amplop JSON** → alamatnya benar, isinya yang bermasalah
+
+| Yang terlihat | Sebabnya biasanya |
+|---|---|
+| `401 unauthorized` | kunci belum diisi, salah, atau sudah dicabut. Ketiganya dijawab sama — membedakannya cuma berguna bagi yang menebak-nebak |
+| `409 already_claimed` | konten sedang dipegang aplikasi lain, sudah tayang, atau sudah dibatalkan. Lewati, ambil berikutnya — ini bukan kegagalan |
+| `400 invalid_input` | kiriman yang tidak bisa diproses. Mengulang yang sama akan gagal lagi; `message` menyebut sebab persisnya |
+| `413` tanpa amplop | ditolak nginx sebelum sampai ke servis. Naikkan `client_max_body_size` |
+| `429` | terlalu sering memanggil. Tunggu, jangan ubah apa pun |
+| `500 database_error` / `server_error` | salah kami, layak dicoba lagi nanti. Sebab aslinya ada di log servis, tidak pernah dikirim keluar |
+
+Membaca log servis di server:
+
+```bash
+journalctl -u stock-engine -n 50 --no-pager     # terakhir
+journalctl -u stock-engine -f                   # ikuti langsung
+journalctl -u stock-engine -p err --no-pager    # yang perlu dilihat orang saja
+```
+
+Tiap baris JSON. Yang `"msg":"request"` adalah lalu lintas biasa; yang
+`"msg":"operasi gagal"` menyebut **fungsi mana** yang gagal dan atas nama siapa.
+Isi request tidak pernah ikut — yang lewat servis ini berkas konten dan kunci
+API, dan log adalah tempat paling gampang untuk membocorkan keduanya tanpa
+sadar.
+
+Servis menolak menyala? Sebabnya disebut di baris pertama:
+
+```bash
+systemctl status stock-engine --no-pager
+```
+
+Kalau berbunyi `Start request repeated too quickly`, systemd sudah menyerah —
+perbaiki sebabnya lalu `systemctl reset-failed stock-engine` sebelum
+menyalakannya lagi.
 
 ---
 
@@ -238,4 +437,4 @@ keduanya sekaligus; jalankan lewat cron.
 |---|---|
 | SQLite: satu proses yang menulis | Saat servisnya berjalan lebih dari satu salinan. Saat itu juga pembatas laju berhenti benar — keduanya jatuh tempo bersamaan |
 | Berkas di disk servis | Saat `storage/` melewati kapasitas VPS. Itu satu-satunya alasan sah pindah ke S3/R2 |
-| Berkas yang diarsipkan tidak ikut dibuang | Saat disk menipis. Butuh pekerjaan sapuan tersendiri |
+| Tidak ada peringatan sebelum disk habis | Retensi membatasi konten lama, bukan kecepatan konten baru masuk. Itu pekerjaan pemantauan VPS |

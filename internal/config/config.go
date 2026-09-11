@@ -12,6 +12,7 @@ package config
 import (
 	"bufio"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -44,8 +45,38 @@ type Config struct {
 	// diturunkan saat disk menipis tanpa kompilasi ulang.
 	MaxUploadMB int
 
+	// Berapa lama berkas konten yang sudah selesai disimpan sebelum dibuang.
+	//
+	// "Selesai" berarti sudah tayang atau sudah dibatalkan. Stok yang masih
+	// menunggu gilirannya tidak pernah disentuh, berapa lama pun sudah diunggah.
+	//
+	// Yang dibuang cuma berkasnya — baris, jadwal, dan riwayatnya tetap.
+	// Bawaannya 90 hari. Diisi 0 berarti tidak pernah dibuang, dan itu pilihan
+	// yang sah asal disknya diawasi manusia.
+	RetentionDays int
+
+	// Berapa lama konten boleh dipegang satu aplikasi sebelum claimnya dilepas.
+	//
+	// Integrator yang mati sesudah mengclaim membuat kontennya diam di
+	// `claimed` selamanya — tidak pernah tayang, dan tidak pernah muncul lagi di
+	// antrean kerja. Ambang ini yang mengembalikannya.
+	//
+	// Bawaannya 2 jam, dan angkanya bukan kehati-hatian berlebihan: ambang yang
+	// terlalu pendek merebut konten dari integrator yang **masih** mengunggah
+	// video besar di jaringan pelan, dan hasilnya konten tayang dua kali.
+	// Diisi 0 berarti tidak pernah dilepas otomatis.
+	ClaimTimeoutHours int
+
 	// Alamat panel web yang boleh memanggil servis ini.
 	AllowedOrigins []string
+
+	// Jaringan tempat proxy di depan servis ini berada.
+	//
+	// Cuma dari sinilah header alamat asli (`X-Real-IP`, `X-Forwarded-For`)
+	// dipercaya. Bawaannya loopback saja, karena nginx berjalan di mesin yang
+	// sama — dan itu juga bawaan yang aman kalau servisnya ternyata terbuka
+	// langsung ke internet: header dari luar tidak akan pernah dipercaya.
+	TrustedProxies []netip.Prefix
 
 	Address string
 }
@@ -64,11 +95,14 @@ func Load() (Config, error) {
 	loadEnvFile(EnvFile)
 
 	cfg := Config{
-		StorageDir:     valueOr("STORAGE_DIR", "storage"),
-		AdminKey:       os.Getenv("ADMIN_KEY"),
-		MaxUploadMB:    whole("MAX_UPLOAD_MB", 200),
-		AllowedOrigins: split(valueOr("ALLOWED_ORIGINS", "http://localhost:3000")),
-		Address:        valueOr("ADDRESS", ":8080"),
+		StorageDir:        valueOr("STORAGE_DIR", "storage"),
+		AdminKey:          os.Getenv("ADMIN_KEY"),
+		MaxUploadMB:       whole("MAX_UPLOAD_MB", 200),
+		RetentionDays:     retention("RETENTION_DAYS", 90),
+		ClaimTimeoutHours: retention("CLAIM_TIMEOUT_HOURS", 2),
+		AllowedOrigins:    split(valueOr("ALLOWED_ORIGINS", "http://localhost:3000")),
+		TrustedProxies:    prefixes(valueOr("TRUSTED_PROXIES", "127.0.0.0/8,::1/128")),
+		Address:           valueOr("ADDRESS", ":8080"),
 	}
 
 	// Kunci pendek bisa ditebak, dan kunci induk yang tertebak berarti seluruh
@@ -125,11 +159,62 @@ func whole(key string, fallback int) int {
 	return n
 }
 
+// Retention adalah RetentionDays dalam bentuk durasi. Nol berarti tidak pernah
+// membuang berkas.
+func (c Config) Retention() time.Duration {
+	return time.Duration(c.RetentionDays) * 24 * time.Hour
+}
+
+// ClaimTimeout adalah ClaimTimeoutHours dalam bentuk durasi. Nol berarti claim
+// tidak pernah dilepas otomatis.
+func (c Config) ClaimTimeout() time.Duration {
+	return time.Duration(c.ClaimTimeoutHours) * time.Hour
+}
+
+// retention membaca ambang yang nolnya berarti "jangan pernah".
+//
+// Berbeda dari whole(): **nol diterima apa adanya**, karena "jangan pernah"
+// adalah pilihan yang sah. Yang ditolak cuma nilai minus dan yang bukan
+// angka — keduanya lebih mungkin salah ketik daripada niat, dan salah ketik
+// tidak boleh diam-diam mematikan sapuan.
+func retention(key string, fallback int) int {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback
+	}
+
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 0 {
+		return fallback
+	}
+	return n
+}
+
 func valueOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
 	}
 	return fallback
+}
+
+// prefixes membaca daftar jaringan yang dipercaya.
+//
+// Menerima CIDR (`10.0.0.0/8`) maupun alamat tunggal (`10.0.0.5`). Yang tidak
+// terbaca **dibuang diam-diam**, dan itu disengaja: jaringan yang salah ketik
+// lebih baik tidak dipercaya daripada dipercaya setengah-setengah.
+func prefixes(raw string) []netip.Prefix {
+	var list []netip.Prefix
+
+	for _, item := range split(raw) {
+		if jaringan, err := netip.ParsePrefix(item); err == nil {
+			list = append(list, jaringan)
+			continue
+		}
+		if alamat, err := netip.ParseAddr(item); err == nil {
+			list = append(list, netip.PrefixFrom(alamat, alamat.BitLen()))
+		}
+	}
+	return list
 }
 
 func split(raw string) []string {

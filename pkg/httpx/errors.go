@@ -69,9 +69,13 @@ func NotFound(message string) *Error {
 // AlreadyClaimed adalah jawaban untuk lomba yang memang dirancang terjadi: dua
 // integrator meminta konten yang sama, satu menang.
 //
-// Bukan galat dari sisi pemanggil — dia cuma perlu mengambil yang berikutnya.
-func AlreadyClaimed() *Error {
-	return newError(http.StatusConflict, StatusAlreadyClaimed, "This content is already claimed by another app.")
+// Bukan galat dari sisi pemanggil — dia cuma perlu mengambil yang berikutnya,
+// dan itu tindakan yang sama untuk semua sebab yang memakai golongan ini. Yang
+// berbeda cuma kalimatnya, jadi kalimatnya datang dari pemanggil: "sudah diambil
+// aplikasi lain" dan "sudah tayang" menuntun orang yang membaca log ke tempat
+// yang berbeda.
+func AlreadyClaimed(message string) *Error {
+	return newError(http.StatusConflict, StatusAlreadyClaimed, message)
 }
 
 func TooManyRequests() *Error {

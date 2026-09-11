@@ -10,6 +10,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"time"
 
 	"github.com/gemgum/stock-engine/internal/handlers"
@@ -28,6 +29,11 @@ type Options struct {
 	AdminAuth httpx.Authenticator
 
 	AllowedOrigins []string
+
+	// TrustedProxies menentukan dari mana header alamat asli boleh dipercaya.
+	// Kosong berarti tidak satu pun — pembatas laju kembali menghitung per
+	// alamat sambungan langsung.
+	TrustedProxies []netip.Prefix
 
 	// Alive dipanggil /healthz. Nil berarti kesehatannya tidak diperiksa —
 	// dipakai uji yang merakit router tanpa database.
@@ -75,7 +81,7 @@ func NewRouter(opts Options) http.Handler {
 		middleware.Recover(opts.Logger),
 		middleware.CORS(opts.AllowedOrigins),
 		middleware.Log(opts.Logger),
-		middleware.RateLimit(general, opts.Logger),
+		middleware.RateLimit(general, opts.TrustedProxies, opts.Logger),
 	)
 }
 
