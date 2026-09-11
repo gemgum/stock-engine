@@ -1,0 +1,5 @@
+# Isi gudang. Tidak pernah masuk git — ini yang dicadangkan terpisah.
+storage/
+
+.env
+bin/

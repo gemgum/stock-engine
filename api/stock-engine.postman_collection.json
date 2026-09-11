@@ -1,0 +1,224 @@
+{
+  "info": {
+    "name": "Stock Engine",
+    "description": "Gudang konten social media. Isi variabel base_url, admin_key, dan app_key di tab Variables. Alur integrator ada di folder 'Alur integrator', berurutan dari atas ke bawah.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:8080" },
+    { "key": "admin_key", "value": "" },
+    { "key": "app_key", "value": "" },
+    { "key": "content_id", "value": "" },
+    { "key": "app_id", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Kesehatan",
+      "item": [
+        {
+          "name": "GET /healthz",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/healthz", "host": ["{{base_url}}"], "path": ["healthz"] },
+            "description": "Terbuka tanpa kunci. Ikut menyentuh database, jadi 'sehat' di sini benar-benar berarti bisa melayani."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Aplikasi (kunci induk)",
+      "description": "Cuma bisa dipanggil dengan ADMIN_KEY.",
+      "item": [
+        {
+          "name": "POST /v1/apps",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{admin_key}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"poster-instagram\"\n}" },
+            "url": { "raw": "{{base_url}}/v1/apps", "host": ["{{base_url}}"], "path": ["v1", "apps"] },
+            "description": "Kuncinya muncul di balasan ini SATU KALI. Salin sekarang — yang disimpan cuma hashnya."
+          }
+        },
+        {
+          "name": "GET /v1/apps",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{admin_key}}" }],
+            "url": { "raw": "{{base_url}}/v1/apps", "host": ["{{base_url}}"], "path": ["v1", "apps"] }
+          }
+        },
+        {
+          "name": "POST /v1/apps/{id}/revocation",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{admin_key}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{}" },
+            "url": {
+              "raw": "{{base_url}}/v1/apps/{{app_id}}/revocation",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "apps", "{{app_id}}", "revocation"]
+            },
+            "description": "Kuncinya berhenti bekerja. Kontennya tidak ikut hilang — gudangnya satu."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Alur integrator",
+      "description": "Empat langkah, urutannya tidak boleh dibalik.",
+      "item": [
+        {
+          "name": "1. GET /v1/contents?scope=due",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{app_key}}" }],
+            "url": {
+              "raw": "{{base_url}}/v1/contents?scope=due&platform=instagram",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "contents"],
+              "query": [
+                { "key": "scope", "value": "due" },
+                { "key": "platform", "value": "instagram" }
+              ]
+            },
+            "description": "Jangan hitung 'sudah waktunya' sendiri. Beda zona waktu dan jeda cron bikin konten terlewat atau dobel."
+          }
+        },
+        {
+          "name": "2. POST /v1/contents/{id}/claim",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{app_key}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{}" },
+            "url": {
+              "raw": "{{base_url}}/v1/contents/{{content_id}}/claim",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "contents", "{{content_id}}", "claim"]
+            },
+            "description": "409 already_claimed berarti aplikasi lain sudah mengambilnya. Lewati, ambil berikutnya — itu bukan galat."
+          }
+        },
+        {
+          "name": "3. GET /v1/contents/{id}/file",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{app_key}}" }],
+            "url": {
+              "raw": "{{base_url}}/v1/contents/{{content_id}}/file",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "contents", "{{content_id}}", "file"]
+            },
+            "description": "Mendukung header Range, jadi video bisa diambil sebagian."
+          }
+        },
+        {
+          "name": "4. POST /v1/contents/{id}/publication",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{app_key}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"published\": false,\n  \"reason\": \"token instagram kedaluwarsa\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/contents/{{content_id}}/publication",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "contents", "{{content_id}}", "publication"]
+            },
+            "description": "published true tanpa reason, atau false beserta reason. Gagal tanpa alasan ditolak."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Konten",
+      "item": [
+        {
+          "name": "POST /v1/contents",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{app_key}}" }],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                { "key": "file", "type": "file", "src": [] },
+                { "key": "scheduled_at", "value": "2026-09-12T09:00:00+07:00", "type": "text" },
+                { "key": "caption", "value": "halo dunia", "type": "text" },
+                { "key": "platform", "value": "instagram", "type": "text" }
+              ]
+            },
+            "url": { "raw": "{{base_url}}/v1/contents", "host": ["{{base_url}}"], "path": ["v1", "contents"] },
+            "description": "scheduled_at wajib RFC3339 LENGKAP dengan zona waktu. Tanpa zona, jadwalnya ditafsirkan sebagai waktu server."
+          }
+        },
+        {
+          "name": "GET /v1/contents/{id}",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{app_key}}" }],
+            "url": {
+              "raw": "{{base_url}}/v1/contents/{{content_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "contents", "{{content_id}}"]
+            }
+          }
+        },
+        {
+          "name": "POST /v1/contents/{id}/schedule",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{app_key}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"scheduled_at\": \"2026-09-13T09:00:00+07:00\"\n}" },
+            "url": {
+              "raw": "{{base_url}}/v1/contents/{{content_id}}/schedule",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "contents", "{{content_id}}", "schedule"]
+            },
+            "description": "Memindahkan jadwal sekaligus mengembalikan kontennya ke antrean. Yang sudah published ditolak."
+          }
+        },
+        {
+          "name": "POST /v1/contents/{id}/archival",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{app_key}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{}" },
+            "url": {
+              "raw": "{{base_url}}/v1/contents/{{content_id}}/archival",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "contents", "{{content_id}}", "archival"]
+            },
+            "description": "Keluar dari antrean, tapi tetap terbaca. Servis ini tidak pernah menghapus apa pun."
+          }
+        },
+        {
+          "name": "GET /v1/me",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{app_key}}" }],
+            "url": { "raw": "{{base_url}}/v1/me", "host": ["{{base_url}}"], "path": ["v1", "me"] }
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,185 @@
+package repository
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"time"
+
+	"github.com/gemgum/stock-engine/internal/models"
+	"github.com/gemgum/stock-engine/pkg/httpx"
+)
+
+type Content struct{}
+
+const kolomContent = `id, filename, mime, size, checksum, caption, platform,
+	scheduled_at, status, claimed_by, claimed_at, published_at, failure_reason,
+	archived_at, uploaded_by, created_at`
+
+func scanContent(row Scanner) (models.Content, error) {
+	var (
+		c                                  models.Content
+		scheduledAt, createdAt             string
+		claimedBy, failureReason           sql.NullString
+		claimedAt, publishedAt, archivedAt sql.NullString
+		err                                error
+	)
+
+	if err = row.Scan(&c.ID, &c.Filename, &c.Mime, &c.Size, &c.Checksum, &c.Caption,
+		&c.Platform, &scheduledAt, &c.Status, &claimedBy, &claimedAt, &publishedAt,
+		&failureReason, &archivedAt, &c.UploadedBy, &createdAt); err != nil {
+		return c, err
+	}
+
+	if c.ScheduledAt, err = ReadTime(scheduledAt); err != nil {
+		return c, err
+	}
+	if c.CreatedAt, err = ReadTime(createdAt); err != nil {
+		return c, err
+	}
+	if c.ClaimedAt, err = ReadTimePtr(claimedAt); err != nil {
+		return c, err
+	}
+	if c.PublishedAt, err = ReadTimePtr(publishedAt); err != nil {
+		return c, err
+	}
+	if c.ArchivedAt, err = ReadTimePtr(archivedAt); err != nil {
+		return c, err
+	}
+
+	c.ClaimedBy = ReadStringPtr(claimedBy)
+	c.FailureReason = ReadStringPtr(failureReason)
+	return c, nil
+}
+
+func (Content) Insert(ctx context.Context, in models.NewContent) (models.Content, error) {
+	const q = `INSERT INTO contents
+		(id, filename, mime, size, checksum, caption, platform, scheduled_at,
+		 status, uploaded_by, created_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?)
+		RETURNING ` + kolomContent
+
+	return One(ctx, scanContent, q,
+		in.ID, in.Filename, in.Mime, in.Size, in.Checksum, in.Caption, in.Platform,
+		Stamp(in.ScheduledAt), models.StatusScheduled, in.UploadedBy, Stamp(time.Now()))
+}
+
+func (Content) Get(ctx context.Context, id string) (models.Content, error) {
+	return One(ctx, scanContent, `SELECT `+kolomContent+` FROM contents WHERE id = ?`, id)
+}
+
+// List menyusun penyaringnya dari scope.
+//
+// Urutannya selalu menurut jadwal, bukan menurut waktu unggah: yang ditanyakan
+// integrator adalah "mana yang berikutnya tayang", dan itu urutan jadwal.
+func (Content) List(ctx context.Context, f models.ContentFilter) ([]models.Content, error) {
+	where := ""
+	var args []any
+
+	switch f.Scope {
+	case models.ScopeDue:
+		// Dua syarat, dan keduanya wajib: sudah waktunya, **dan** belum diambil
+		// siapa pun. Yang cuma memeriksa jadwal akan terus mengembalikan konten
+		// yang sedang diproses integrator lain.
+		where = `WHERE status = ? AND scheduled_at <= ?`
+		args = append(args, models.StatusScheduled, Stamp(f.Now))
+	case models.ScopeAll:
+		where = `WHERE 1 = 1`
+	default:
+		where = `WHERE status = ?`
+		args = append(args, string(f.Scope))
+	}
+
+	if f.Platform != "" {
+		where += ` AND platform = ?`
+		args = append(args, f.Platform)
+	}
+
+	// ponytail: pagination lewat offset. Cukup untuk antrean berukuran ribuan;
+	// ganti ke keysetnya (scheduled_at, id) kalau daftarnya tumbuh sampai
+	// halaman belakang terasa lambat.
+	q := fmt.Sprintf(`SELECT %s FROM contents %s ORDER BY scheduled_at ASC LIMIT ? OFFSET ?`,
+		kolomContent, where)
+	args = append(args, f.Limit, f.Offset)
+
+	return Many(ctx, scanContent, q, args...)
+}
+
+// Claim menang atau kalah dalam satu perintah.
+//
+// Syarat `status = 'scheduled'` ada di dalam UPDATE-nya, bukan diperiksa lebih
+// dulu lalu ditulis. Kalau dipisah jadi dua langkah, dua integrator bisa
+// sama-sama lolos pemeriksaan sebelum salah satunya sempat menulis — dan
+// keduanya memposting konten yang sama.
+func (Content) Claim(ctx context.Context, id, appID string, at time.Time) (bool, error) {
+	const q = `UPDATE contents SET status = ?, claimed_by = ?, claimed_at = ?
+		WHERE id = ? AND status = ?`
+
+	changed, err := Exec(ctx, q, models.StatusClaimed, appID, Stamp(at), id, models.StatusScheduled)
+	return changed > 0, err
+}
+
+// SetPublication mencatat hasil akhir yang dilaporkan integrator.
+//
+// Cuma menerima konten yang sudah diclaim. Laporan atas konten yang belum
+// diambil berarti integrator memposting tanpa mengunci lebih dulu, dan itu
+// justru keadaan yang seluruh mekanisme claim ini cegah.
+func (Content) SetPublication(ctx context.Context, id string, status models.Status,
+	reason *string, at time.Time) error {
+
+	const q = `UPDATE contents SET status = ?, failure_reason = ?, published_at = ?
+		WHERE id = ? AND status = ?`
+
+	var publishedAt any
+	if status == models.StatusPublished {
+		publishedAt = Stamp(at)
+	}
+
+	changed, err := Exec(ctx, q, status, reason, publishedAt, id, models.StatusClaimed)
+	if err != nil {
+		return err
+	}
+	if changed == 0 {
+		return httpx.BadRequest("Only claimed content can be reported as published or failed.")
+	}
+	return nil
+}
+
+// SetSchedule memindahkan jadwal dan mengembalikan kontennya ke antrean.
+//
+// Satu alamat mengerjakan dua hal karena keduanya memang selalu diminta
+// bersamaan: yang memindahkan jadwal konten gagal selalu bermaksud
+// mencobanya lagi. Alamat terpisah untuk "kembalikan ke antrean" berarti dua
+// panggilan yang tidak pernah dipakai sendiri-sendiri.
+func (Content) SetSchedule(ctx context.Context, id string, at time.Time) error {
+	const q = `UPDATE contents
+		SET scheduled_at = ?, status = ?, claimed_by = NULL, claimed_at = NULL,
+		    failure_reason = NULL
+		WHERE id = ? AND status != ?`
+
+	changed, err := Exec(ctx, q, Stamp(at), models.StatusScheduled, id, models.StatusPublished)
+	if err != nil {
+		return err
+	}
+	if changed == 0 {
+		return httpx.BadRequest("Published content cannot be rescheduled.")
+	}
+	return nil
+}
+
+// Archive mengeluarkan konten dari antrean tanpa menghapusnya.
+//
+// Servis ini tidak pernah menghapus apa pun: yang batal tetap harus terbaca
+// riwayatnya, dan berkasnya tetap ada sampai ada yang sengaja membuangnya.
+func (Content) Archive(ctx context.Context, id string, at time.Time) error {
+	const q = `UPDATE contents SET status = ?, archived_at = ? WHERE id = ?`
+
+	changed, err := Exec(ctx, q, models.StatusArchived, Stamp(at), id)
+	if err != nil {
+		return err
+	}
+	if changed == 0 {
+		return httpx.NotFound("The requested item does not exist.")
+	}
+	return nil
+}
