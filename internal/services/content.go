@@ -46,7 +46,7 @@ func NewContentService(db database.Runner, repo models.ContentRepository,
 func (s *ContentService) Upload(ctx context.Context, actor string, in models.NewContent,
 	src io.Reader) (models.Content, error) {
 
-	if err := validasiUnggahan(in); err != nil {
+	if err := validateUpload(in); err != nil {
 		return models.Content{}, logError(ctx, s.logger, "ContentService.Upload", actor, err)
 	}
 
@@ -80,7 +80,7 @@ func (s *ContentService) Upload(ctx context.Context, actor string, in models.New
 	return created, nil
 }
 
-func validasiUnggahan(in models.NewContent) error {
+func validateUpload(in models.NewContent) error {
 	if strings.TrimSpace(in.Filename) == "" {
 		return httpx.BadRequest("The file has no name.")
 	}
@@ -94,7 +94,7 @@ func (s *ContentService) List(ctx context.Context, actor string,
 	filter models.ContentFilter) ([]models.Content, error) {
 
 	filter.Now = s.now()
-	filter.Limit, filter.Offset = batasHalaman(filter.Limit, filter.Offset)
+	filter.Limit, filter.Offset = pageLimits(filter.Limit, filter.Offset)
 
 	return run(ctx, s.base, "ContentService.List", actor,
 		func(ctx context.Context) ([]models.Content, error) {
@@ -102,13 +102,13 @@ func (s *ContentService) List(ctx context.Context, actor string,
 		})
 }
 
-// batasHalaman menjaga permintaan yang tidak masuk akal tidak menarik seluruh
+// pageLimits menjaga permintaan yang tidak masuk akal tidak menarik seluruh
 // tabel ke memori.
 //
 // Batas atasnya 200 karena yang memanggil `?scope=due` tiap beberapa menit
 // tidak pernah butuh lebih; yang butuh lebih sedang mengekspor, dan ekspor
 // boleh memanggil beberapa kali.
-func batasHalaman(limit, offset int) (int, int) {
+func pageLimits(limit, offset int) (int, int) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
@@ -146,11 +146,11 @@ func (s *ContentService) File(ctx context.Context, actor, id string) (models.Con
 func (s *ContentService) Claim(ctx context.Context, actor, id string) (models.Content, error) {
 	return run(ctx, s.base, "ContentService.Claim", actor,
 		func(ctx context.Context) (models.Content, error) {
-			menang, err := s.repo.Claim(ctx, id, actor, s.now())
+			won, err := s.repo.Claim(ctx, id, actor, s.now())
 			if err != nil {
 				return models.Content{}, err
 			}
-			if !menang {
+			if !won {
 				// Bedakan "tidak ada" dari "sudah diambil": yang pertama berarti
 				// integrator salah id, yang kedua berarti dia cuma kalah cepat.
 				if _, err := s.repo.Get(ctx, id); err != nil {
@@ -171,7 +171,7 @@ func (s *ContentService) Publish(ctx context.Context, actor, id string, publishe
 	reason string) (models.Content, error) {
 
 	status := models.StatusPublished
-	var alasan *string
+	var storedReason *string
 
 	if !published {
 		status = models.StatusFailed
@@ -179,12 +179,12 @@ func (s *ContentService) Publish(ctx context.Context, actor, id string, publishe
 			return models.Content{}, logError(ctx, s.logger, "ContentService.Publish", actor,
 				httpx.BadRequest("Field 'reason' is required when reporting a failure."))
 		}
-		alasan = &reason
+		storedReason = &reason
 	}
 
 	return run(ctx, s.base, "ContentService.Publish", actor,
 		func(ctx context.Context) (models.Content, error) {
-			if err := s.repo.SetPublication(ctx, id, status, alasan, s.now()); err != nil {
+			if err := s.repo.SetPublication(ctx, id, status, storedReason, s.now()); err != nil {
 				return models.Content{}, err
 			}
 			return s.repo.Get(ctx, id)

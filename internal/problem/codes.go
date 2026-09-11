@@ -35,11 +35,11 @@ func FromDatabase(err error) error {
 		return httpx.NotFound("The requested item does not exist.")
 	}
 
-	pesan := err.Error()
+	message := err.Error()
 	switch {
-	case strings.Contains(pesan, "UNIQUE constraint"):
+	case strings.Contains(message, "UNIQUE constraint"):
 		return httpx.BadRequest("That value already exists.").WithCause(err)
-	case strings.Contains(pesan, "FOREIGN KEY constraint"):
+	case strings.Contains(message, "FOREIGN KEY constraint"):
 		return httpx.BadRequest("That reference points to something that does not exist.").WithCause(err)
 	}
 

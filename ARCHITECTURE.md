@@ -41,6 +41,7 @@ tetangganya, dan satu lapis folder yang isinya cuma satu hal hanya menambah
 panjang tiap path tanpa memisahkan apa pun.
 
 ```
+CLAUDE.md          aturan kerja + status keputusan
 README.md          cara menjalankan + panduan integrator
 ARCHITECTURE.md    berkas ini
 
@@ -291,7 +292,22 @@ sudah harus ada.**
 
 ---
 
-## 7. Yang belum ada, dan itu disengaja
+## 7. Penamaan
+
+Sudah ada di `CLAUDE.md`, diulang di sini karena ini tempat orang mencarinya:
+
+- Nama di dalam kode **bahasa Inggris** — berkas, tipe, fungsi, variabel,
+  parameter, konstanta, kolom database, variabel skrip shell. **Termasuk nama
+  uji**: `TestClaimWinsOnlyOnce`, bukan `TestClaimCumaMenangSekali`.
+- Komentar dan dokumen **bahasa Indonesia**. Penjelasan perilaku yang tidak muat
+  di nama uji ditulis sebagai komentar di atasnya.
+- Field `message` di amplop jawaban **selalu Inggris**: yang membacanya developer
+  integrator, yang belum tentu orang Indonesia.
+- Cari fungsi yang sudah ada sebelum menulis yang baru.
+
+---
+
+## 8. Yang belum ada, dan itu disengaja
 
 | Belum ada | Kapan layak ditambah |
 |---|---|

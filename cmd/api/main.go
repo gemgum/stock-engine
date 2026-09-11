@@ -23,13 +23,13 @@ import (
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
-	if err := jalan(logger); err != nil {
+	if err := run(logger); err != nil {
 		logger.Error("servis berhenti", "error", err)
 		os.Exit(1)
 	}
 }
 
-func jalan(logger *slog.Logger) error {
+func run(logger *slog.Logger) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return err
@@ -80,11 +80,11 @@ func jalan(logger *slog.Logger) error {
 
 	// Berhenti dengan rapi: permintaan yang sedang jalan diberi waktu selesai.
 	// Unggahan 200MB yang diputus di tengah harus dikirim ulang dari nol.
-	berhenti := make(chan os.Signal, 1)
-	signal.Notify(berhenti, os.Interrupt, syscall.SIGTERM)
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 
 	go func() {
-		<-berhenti
+		<-stop
 		logger.Info("servis diminta berhenti")
 
 		ctx, cancel := context.WithTimeout(context.Background(), config.ShutdownGrace)

@@ -10,17 +10,17 @@ if [ $# -ne 1 ]; then
   exit 1
 fi
 
-SUMBER="$1"
+SOURCE="$1"
 STORAGE_DIR="${STORAGE_DIR:-storage}"
 
-[ -d "$SUMBER" ] || { echo "cadangan $SUMBER tidak ada" >&2; exit 1; }
+[ -d "$SOURCE" ] || { echo "cadangan $SOURCE tidak ada" >&2; exit 1; }
 
 if [ -d "$STORAGE_DIR" ]; then
   mv "$STORAGE_DIR" "$STORAGE_DIR.sebelum-restore-$(date -u +%Y%m%dT%H%M%SZ)"
 fi
 
 mkdir -p "$STORAGE_DIR"
-cp "$SUMBER/stock.db" "$STORAGE_DIR/stock.db"
-cp -r "$SUMBER/files" "$STORAGE_DIR/files"
+cp "$SOURCE/stock.db" "$STORAGE_DIR/stock.db"
+cp -r "$SOURCE/files" "$STORAGE_DIR/files"
 
-echo "restore selesai dari $SUMBER"
+echo "restore selesai dari $SOURCE"

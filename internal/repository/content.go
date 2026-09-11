@@ -12,7 +12,7 @@ import (
 
 type Content struct{}
 
-const kolomContent = `id, filename, mime, size, checksum, caption, platform,
+const contentColumns = `id, filename, mime, size, checksum, caption, platform,
 	scheduled_at, status, claimed_by, claimed_at, published_at, failure_reason,
 	archived_at, uploaded_by, created_at`
 
@@ -57,7 +57,7 @@ func (Content) Insert(ctx context.Context, in models.NewContent) (models.Content
 		(id, filename, mime, size, checksum, caption, platform, scheduled_at,
 		 status, uploaded_by, created_at)
 		VALUES (?,?,?,?,?,?,?,?,?,?,?)
-		RETURNING ` + kolomContent
+		RETURNING ` + contentColumns
 
 	return One(ctx, scanContent, q,
 		in.ID, in.Filename, in.Mime, in.Size, in.Checksum, in.Caption, in.Platform,
@@ -65,7 +65,7 @@ func (Content) Insert(ctx context.Context, in models.NewContent) (models.Content
 }
 
 func (Content) Get(ctx context.Context, id string) (models.Content, error) {
-	return One(ctx, scanContent, `SELECT `+kolomContent+` FROM contents WHERE id = ?`, id)
+	return One(ctx, scanContent, `SELECT `+contentColumns+` FROM contents WHERE id = ?`, id)
 }
 
 // List menyusun penyaringnya dari scope.
@@ -99,7 +99,7 @@ func (Content) List(ctx context.Context, f models.ContentFilter) ([]models.Conte
 	// ganti ke keysetnya (scheduled_at, id) kalau daftarnya tumbuh sampai
 	// halaman belakang terasa lambat.
 	q := fmt.Sprintf(`SELECT %s FROM contents %s ORDER BY scheduled_at ASC LIMIT ? OFFSET ?`,
-		kolomContent, where)
+		contentColumns, where)
 	args = append(args, f.Limit, f.Offset)
 
 	return Many(ctx, scanContent, q, args...)

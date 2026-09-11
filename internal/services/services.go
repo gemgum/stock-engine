@@ -31,8 +31,8 @@ type base struct {
 func run[T any](ctx context.Context, b base, op, actor string,
 	fn func(context.Context) (T, error)) (T, error) {
 
-	hasil, err := database.Query(ctx, b.db, fn)
-	return hasil, logError(ctx, b.logger, op, actor, err)
+	result, err := database.Query(ctx, b.db, fn)
+	return result, logError(ctx, b.logger, op, actor, err)
 }
 
 // logError mencatat satu galat, lalu mengembalikannya apa adanya.
@@ -49,18 +49,18 @@ func logError(ctx context.Context, logger *slog.Logger, op, actor string, err er
 		return err
 	}
 
-	galat := httpx.From(err)
+	appErr := httpx.From(err)
 
 	level := slog.LevelInfo
-	if galat.HTTPStatus() >= 500 {
+	if appErr.HTTPStatus() >= 500 {
 		level = slog.LevelError
 	}
 
 	logger.Log(ctx, level, "operasi gagal",
 		"op", op,
 		"actor", actor,
-		"status", string(galat.Status),
-		"code", galat.Code,
+		"status", string(appErr.Status),
+		"code", appErr.Code,
 		"error", err.Error(),
 	)
 	return err

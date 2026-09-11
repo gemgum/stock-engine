@@ -55,7 +55,7 @@ func (h *ContentHandler) Upload(w http.ResponseWriter, r *http.Request) error {
 	}
 	defer func() { _ = file.Close() }()
 
-	scheduledAt, err := waktu(r.FormValue("scheduled_at"))
+	scheduledAt, err := parseTime(r.FormValue("scheduled_at"))
 	if err != nil {
 		return err
 	}
@@ -127,7 +127,7 @@ func (h *ContentHandler) File(w http.ResponseWriter, r *http.Request) error {
 		w.Header().Set("Content-Type", content.Mime)
 	}
 	// Nama aslinya dikembalikan lewat header, karena di disk namanya cuma id.
-	w.Header().Set("Content-Disposition", `attachment; filename="`+namaAman(content.Filename)+`"`)
+	w.Header().Set("Content-Disposition", `attachment; filename="`+safeFilename(content.Filename)+`"`)
 
 	http.ServeFile(w, r, path)
 	return nil
@@ -170,7 +170,7 @@ func (h *ContentHandler) Reschedule(w http.ResponseWriter, r *http.Request) erro
 		return err
 	}
 
-	at, err := waktu(body.ScheduledAt)
+	at, err := parseTime(body.ScheduledAt)
 	if err != nil {
 		return err
 	}
@@ -194,12 +194,12 @@ func (h *ContentHandler) Archive(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
-// waktu membaca jadwal dari kiriman.
+// parseTime membaca jadwal dari kiriman.
 //
 // RFC3339 saja, dan zona waktunya wajib disebut. Tanggal tanpa zona akan
 // ditafsirkan sebagai waktu server, dan integrator di zona lain akan melihat
 // kontennya tayang beberapa jam meleset tanpa pernah tahu kenapa.
-func waktu(raw string) (time.Time, error) {
+func parseTime(raw string) (time.Time, error) {
 	if raw == "" {
 		return time.Time{}, httpx.BadRequest("Field 'scheduled_at' is required, in RFC3339 format (e.g. 2026-09-12T09:00:00+07:00).")
 	}
@@ -211,22 +211,22 @@ func waktu(raw string) (time.Time, error) {
 	return t, nil
 }
 
-// namaAman membuang kutip dan baris baru dari nama berkas.
+// safeFilename membuang kutip dan baris baru dari nama berkas.
 //
 // Nama itu datang dari pengunggah dan dipasang ke dalam header. Kutip yang lolos
 // bisa menyelipkan header lain, dan itu bukan sesuatu yang boleh bergantung pada
 // niat baik pengunggah.
-func namaAman(nama string) string {
-	aman := make([]rune, 0, len(nama))
-	for _, r := range nama {
+func safeFilename(name string) string {
+	safe := make([]rune, 0, len(name))
+	for _, r := range name {
 		switch r {
 		case '"', '\\', '\r', '\n':
 			continue
 		}
-		aman = append(aman, r)
+		safe = append(safe, r)
 	}
-	if len(aman) == 0 {
+	if len(safe) == 0 {
 		return "content"
 	}
-	return string(aman)
+	return string(safe)
 }

@@ -33,8 +33,8 @@ func Recover(logger *slog.Logger) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			defer func() {
-				if panik := recover(); panik != nil {
-					logger.Error("panic", "path", r.URL.Path, "panic", panik)
+				if recovered := recover(); recovered != nil {
+					logger.Error("panic", "path", r.URL.Path, "panic", recovered)
 					httpx.Fail(w, logger, httpx.ServerError(nil))
 				}
 			}()
@@ -68,12 +68,12 @@ func CORS(allowed []string) Middleware {
 
 // pencatat menahan angka status supaya bisa ikut dicatat setelah handler
 // selesai.
-type pencatat struct {
+type recorder struct {
 	http.ResponseWriter
 	status int
 }
 
-func (p *pencatat) WriteHeader(status int) {
+func (p *recorder) WriteHeader(status int) {
 	p.status = status
 	p.ResponseWriter.WriteHeader(status)
 }
@@ -88,7 +88,7 @@ func Log(logger *slog.Logger) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			mulai := time.Now()
-			p := &pencatat{ResponseWriter: w, status: http.StatusOK}
+			p := &recorder{ResponseWriter: w, status: http.StatusOK}
 
 			next.ServeHTTP(p, r)
 
@@ -109,7 +109,7 @@ func Log(logger *slog.Logger) Middleware {
 func RateLimit(limiter *ratelimit.Limiter, logger *slog.Logger) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if !limiter.Allow(pemanggil(r)) {
+			if !limiter.Allow(callerIP(r)) {
 				httpx.Fail(w, logger, httpx.TooManyRequests())
 				return
 			}
@@ -118,7 +118,7 @@ func RateLimit(limiter *ratelimit.Limiter, logger *slog.Logger) Middleware {
 	}
 }
 
-func pemanggil(r *http.Request) string {
+func callerIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr

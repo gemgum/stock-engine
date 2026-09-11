@@ -22,19 +22,19 @@ import (
 
 const adminKey = "kunci-induk-untuk-pengujian-yang-panjangnya-cukup"
 
-// siapkan merakit servis lengkap di atas SQLite sungguhan.
+// setup merakit servis lengkap di atas SQLite sungguhan.
 //
 // Bukan tiruan: yang paling ingin dibuktikan justru perilaku database — claim
 // yang cuma boleh menang sekali, dan urutan waktu yang dibandingkan sebagai
 // teks. Tiruan akan menjawab apa pun yang kita suruh.
-func siapkan(t *testing.T) *httptest.Server {
-	srv, _ := siapkanLengkap(t)
+func setup(t *testing.T) *httptest.Server {
+	srv, _ := setupWith(t)
 	return srv
 }
 
-// siapkanLengkap ikut mengembalikan pengaturannya, untuk uji yang perlu
+// setupWith ikut mengembalikan pengaturannya, untuk uji yang perlu
 // mengintip isi folder penyimpanan.
-func siapkanLengkap(t *testing.T) (*httptest.Server, config.Config) {
+func setupWith(t *testing.T) (*httptest.Server, config.Config) {
 	t.Helper()
 
 	dir := t.TempDir()
@@ -73,15 +73,15 @@ func siapkanLengkap(t *testing.T) (*httptest.Server, config.Config) {
 	return srv, cfg
 }
 
-type jawaban struct {
+type envelope struct {
 	Code    int             `json:"code"`
 	Status  string          `json:"status"`
 	Message string          `json:"message"`
 	Data    json.RawMessage `json:"data"`
 }
 
-func panggil(t *testing.T, srv *httptest.Server, method, path, key string,
-	body io.Reader, contentType string) jawaban {
+func call(t *testing.T, srv *httptest.Server, method, path, key string,
+	body io.Reader, contentType string) envelope {
 	t.Helper()
 
 	req, err := http.NewRequest(method, srv.URL+path, body)
@@ -99,7 +99,7 @@ func panggil(t *testing.T, srv *httptest.Server, method, path, key string,
 	}
 	defer func() { _ = res.Body.Close() }()
 
-	var out jawaban
+	var out envelope
 	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
 		t.Fatalf("%s %s: jawaban bukan JSON: %v", method, path, err)
 	}
@@ -109,23 +109,23 @@ func panggil(t *testing.T, srv *httptest.Server, method, path, key string,
 	return out
 }
 
-func kirimJSON(t *testing.T, srv *httptest.Server, path, key, body string) jawaban {
+func postJSON(t *testing.T, srv *httptest.Server, path, key, body string) envelope {
 	t.Helper()
-	return panggil(t, srv, "POST", path, key, bytes.NewBufferString(body), "application/json")
+	return call(t, srv, "POST", path, key, bytes.NewBufferString(body), "application/json")
 }
 
-// unggah mengirim satu berkas beserta jadwalnya.
-func unggah(t *testing.T, srv *httptest.Server, key, scheduledAt, isi string) jawaban {
+// upload mengirim satu berkas beserta jadwalnya.
+func upload(t *testing.T, srv *httptest.Server, key, scheduledAt, body string) envelope {
 	t.Helper()
 
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
 
-	bagian, err := mw.CreateFormFile("file", "poster.jpg")
+	part, err := mw.CreateFormFile("file", "poster.jpg")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := bagian.Write([]byte(isi)); err != nil {
+	if _, err := part.Write([]byte(body)); err != nil {
 		t.Fatal(err)
 	}
 	_ = mw.WriteField("scheduled_at", scheduledAt)
@@ -135,10 +135,10 @@ func unggah(t *testing.T, srv *httptest.Server, key, scheduledAt, isi string) ja
 		t.Fatal(err)
 	}
 
-	return panggil(t, srv, "POST", "/v1/contents", key, &buf, mw.FormDataContentType())
+	return call(t, srv, "POST", "/v1/contents", key, &buf, mw.FormDataContentType())
 }
 
-func baca[T any](t *testing.T, res jawaban) T {
+func decode[T any](t *testing.T, res envelope) T {
 	t.Helper()
 
 	var out T
@@ -148,7 +148,7 @@ func baca[T any](t *testing.T, res jawaban) T {
 	return out
 }
 
-type konten struct {
+type content struct {
 	ID            string  `json:"id"`
 	Status        string  `json:"status"`
 	Size          int64   `json:"size"`
@@ -157,16 +157,16 @@ type konten struct {
 	FailureReason *string `json:"failure_reason"`
 }
 
-// daftarkanApp menerbitkan satu kunci aplikasi lewat kunci induk.
-func daftarkanApp(t *testing.T, srv *httptest.Server, nama string) string {
+// registerApp menerbitkan satu kunci aplikasi lewat kunci induk.
+func registerApp(t *testing.T, srv *httptest.Server, name string) string {
 	t.Helper()
 
-	res := kirimJSON(t, srv, "/v1/apps", adminKey, `{"name":"`+nama+`"}`)
+	res := postJSON(t, srv, "/v1/apps", adminKey, `{"name":"`+name+`"}`)
 	if res.Code != http.StatusCreated {
 		t.Fatalf("daftar app gagal: %+v", res)
 	}
 
-	app := baca[struct {
+	app := decode[struct {
 		Key string `json:"key"`
 	}](t, res)
 
@@ -176,50 +176,50 @@ func daftarkanApp(t *testing.T, srv *httptest.Server, nama string) string {
 	return app.Key
 }
 
-func TestKunciDitolakKalauTidakDikenal(t *testing.T) {
-	srv := siapkan(t)
+func TestUnknownKeyIsRejected(t *testing.T) {
+	srv := setup(t)
 
-	res := panggil(t, srv, "GET", "/v1/contents", "sk_bukan-kunci-siapa-siapa", nil, "")
+	res := call(t, srv, "GET", "/v1/contents", "sk_bukan-kunci-siapa-siapa", nil, "")
 	if res.Status != "unauthorized" {
 		t.Fatalf("kunci asing harus unauthorized, dapat %q", res.Status)
 	}
 }
 
-func TestKunciAplikasiTidakBolehMendaftarkanAplikasi(t *testing.T) {
-	srv := siapkan(t)
-	key := daftarkanApp(t, srv, "poster-1")
+func TestAppKeyCannotRegisterApps(t *testing.T) {
+	srv := setup(t)
+	key := registerApp(t, srv, "poster-1")
 
-	res := kirimJSON(t, srv, "/v1/apps", key, `{"name":"aplikasi-selundupan"}`)
+	res := postJSON(t, srv, "/v1/apps", key, `{"name":"aplikasi-selundupan"}`)
 	if res.Code != http.StatusUnauthorized {
 		t.Fatalf("kunci aplikasi harus ditolak di /v1/apps, dapat %+v", res)
 	}
 }
 
-func TestKunciYangDicabutBerhentiBekerja(t *testing.T) {
-	srv := siapkan(t)
-	key := daftarkanApp(t, srv, "poster-1")
+func TestRevokedKeyStopsWorking(t *testing.T) {
+	srv := setup(t)
+	key := registerApp(t, srv, "poster-1")
 
-	daftar := baca[[]struct {
+	labels := decode[[]struct {
 		ID string `json:"id"`
-	}](t, panggil(t, srv, "GET", "/v1/apps", adminKey, nil, ""))
-	if len(daftar) != 1 {
-		t.Fatalf("harusnya ada satu aplikasi, dapat %d", len(daftar))
+	}](t, call(t, srv, "GET", "/v1/apps", adminKey, nil, ""))
+	if len(labels) != 1 {
+		t.Fatalf("harusnya ada satu aplikasi, dapat %d", len(labels))
 	}
 
-	if res := kirimJSON(t, srv, "/v1/apps/"+daftar[0].ID+"/revocation", adminKey, `{}`); res.Code != 200 {
+	if res := postJSON(t, srv, "/v1/apps/"+labels[0].ID+"/revocation", adminKey, `{}`); res.Code != 200 {
 		t.Fatalf("pencabutan gagal: %+v", res)
 	}
 
-	if res := panggil(t, srv, "GET", "/v1/contents", key, nil, ""); res.Status != "unauthorized" {
+	if res := call(t, srv, "GET", "/v1/contents", key, nil, ""); res.Status != "unauthorized" {
 		t.Fatalf("kunci yang dicabut harus berhenti bekerja, dapat %q", res.Status)
 	}
 }
 
-func TestScopeYangTidakDikenalDitolak(t *testing.T) {
-	srv := siapkan(t)
-	key := daftarkanApp(t, srv, "poster-1")
+func TestUnknownScopeIsRejected(t *testing.T) {
+	srv := setup(t)
+	key := registerApp(t, srv, "poster-1")
 
-	res := panggil(t, srv, "GET", "/v1/contents?scope=besok", key, nil, "")
+	res := call(t, srv, "GET", "/v1/contents?scope=besok", key, nil, "")
 	if res.Status != "invalid_input" {
 		t.Fatalf("scope asing harus ditolak, dapat %q", res.Status)
 	}
@@ -231,93 +231,93 @@ func TestScopeYangTidakDikenalDitolak(t *testing.T) {
 // yang belum waktunya ikut keluar berarti konten tayang lebih cepat dari
 // jadwalnya, dan tidak ada yang melapor.
 func TestScopeDue(t *testing.T) {
-	srv := siapkan(t)
-	key := daftarkanApp(t, srv, "poster-1")
+	srv := setup(t)
+	key := registerApp(t, srv, "poster-1")
 
-	lampau := time.Now().Add(-time.Hour).Format(time.RFC3339)
-	besok := time.Now().Add(24 * time.Hour).Format(time.RFC3339)
+	past := time.Now().Add(-time.Hour).Format(time.RFC3339)
+	tomorrow := time.Now().Add(24 * time.Hour).Format(time.RFC3339)
 
-	siap := baca[konten](t, unggah(t, srv, key, lampau, "isi-berkas"))
-	unggah(t, srv, key, besok, "belum-waktunya")
+	due := decode[content](t, upload(t, srv, key, past, "isi-berkas"))
+	upload(t, srv, key, tomorrow, "belum-waktunya")
 
-	antrean := baca[[]konten](t, panggil(t, srv, "GET", "/v1/contents?scope=due", key, nil, ""))
-	if len(antrean) != 1 || antrean[0].ID != siap.ID {
-		t.Fatalf("antrean harusnya berisi satu yang sudah waktunya, dapat %+v", antrean)
+	queue := decode[[]content](t, call(t, srv, "GET", "/v1/contents?scope=due", key, nil, ""))
+	if len(queue) != 1 || queue[0].ID != due.ID {
+		t.Fatalf("antrean harusnya berisi satu yang sudah waktunya, dapat %+v", queue)
 	}
 }
 
-// TestClaimCumaMenangSekali adalah alasan seluruh mekanisme claim ada.
-func TestClaimCumaMenangSekali(t *testing.T) {
-	srv := siapkan(t)
-	satu := daftarkanApp(t, srv, "poster-1")
-	dua := daftarkanApp(t, srv, "poster-2")
+// TestClaimWinsOnlyOnce adalah alasan seluruh mekanisme claim ada.
+func TestClaimWinsOnlyOnce(t *testing.T) {
+	srv := setup(t)
+	first := registerApp(t, srv, "poster-1")
+	second := registerApp(t, srv, "poster-2")
 
-	lampau := time.Now().Add(-time.Hour).Format(time.RFC3339)
-	c := baca[konten](t, unggah(t, srv, satu, lampau, "isi-berkas"))
+	past := time.Now().Add(-time.Hour).Format(time.RFC3339)
+	c := decode[content](t, upload(t, srv, first, past, "isi-berkas"))
 
-	menang := kirimJSON(t, srv, "/v1/contents/"+c.ID+"/claim", satu, `{}`)
-	if menang.Code != 200 || baca[konten](t, menang).Status != "claimed" {
-		t.Fatalf("claim pertama harus menang: %+v", menang)
+	won := postJSON(t, srv, "/v1/contents/"+c.ID+"/claim", first, `{}`)
+	if won.Code != 200 || decode[content](t, won).Status != "claimed" {
+		t.Fatalf("claim pertama harus menang: %+v", won)
 	}
 
-	kalah := kirimJSON(t, srv, "/v1/contents/"+c.ID+"/claim", dua, `{}`)
-	if kalah.Status != "already_claimed" || kalah.Code != http.StatusConflict {
-		t.Fatalf("claim kedua harus already_claimed 409, dapat %+v", kalah)
+	lost := postJSON(t, srv, "/v1/contents/"+c.ID+"/claim", second, `{}`)
+	if lost.Status != "already_claimed" || lost.Code != http.StatusConflict {
+		t.Fatalf("claim kedua harus already_claimed 409, dapat %+v", lost)
 	}
 
 	// Yang sudah diambil tidak boleh muncul lagi di antrean, kalau tidak
 	// integrator ketiga akan memposting konten yang sama.
-	antrean := baca[[]konten](t, panggil(t, srv, "GET", "/v1/contents?scope=due", satu, nil, ""))
-	if len(antrean) != 0 {
-		t.Fatalf("yang sudah diclaim masih muncul di antrean: %+v", antrean)
+	queue := decode[[]content](t, call(t, srv, "GET", "/v1/contents?scope=due", first, nil, ""))
+	if len(queue) != 0 {
+		t.Fatalf("yang sudah diclaim masih muncul di antrean: %+v", queue)
 	}
 }
 
-func TestClaimKontenYangTidakAda(t *testing.T) {
-	srv := siapkan(t)
-	key := daftarkanApp(t, srv, "poster-1")
+func TestClaimMissingContent(t *testing.T) {
+	srv := setup(t)
+	key := registerApp(t, srv, "poster-1")
 
-	res := kirimJSON(t, srv, "/v1/contents/tidak-ada/claim", key, `{}`)
+	res := postJSON(t, srv, "/v1/contents/tidak-ada/claim", key, `{}`)
 	if res.Status != "not_found" {
 		t.Fatalf("id asing harus not_found, bukan %q", res.Status)
 	}
 }
 
-func TestLaporanHanyaUntukYangSudahDiclaim(t *testing.T) {
-	srv := siapkan(t)
-	key := daftarkanApp(t, srv, "poster-1")
+func TestPublicationRequiresClaim(t *testing.T) {
+	srv := setup(t)
+	key := registerApp(t, srv, "poster-1")
 
-	lampau := time.Now().Add(-time.Hour).Format(time.RFC3339)
-	c := baca[konten](t, unggah(t, srv, key, lampau, "isi-berkas"))
+	past := time.Now().Add(-time.Hour).Format(time.RFC3339)
+	c := decode[content](t, upload(t, srv, key, past, "isi-berkas"))
 
-	res := kirimJSON(t, srv, "/v1/contents/"+c.ID+"/publication", key, `{"published":true}`)
+	res := postJSON(t, srv, "/v1/contents/"+c.ID+"/publication", key, `{"published":true}`)
 	if res.Status != "invalid_input" {
 		t.Fatalf("lapor tanpa claim harus ditolak, dapat %+v", res)
 	}
 }
 
-func TestGagalWajibMenyebutAlasan(t *testing.T) {
-	srv := siapkan(t)
-	key := daftarkanApp(t, srv, "poster-1")
+func TestFailureRequiresReason(t *testing.T) {
+	srv := setup(t)
+	key := registerApp(t, srv, "poster-1")
 
-	lampau := time.Now().Add(-time.Hour).Format(time.RFC3339)
-	c := baca[konten](t, unggah(t, srv, key, lampau, "isi-berkas"))
-	kirimJSON(t, srv, "/v1/contents/"+c.ID+"/claim", key, `{}`)
+	past := time.Now().Add(-time.Hour).Format(time.RFC3339)
+	c := decode[content](t, upload(t, srv, key, past, "isi-berkas"))
+	postJSON(t, srv, "/v1/contents/"+c.ID+"/claim", key, `{}`)
 
-	res := kirimJSON(t, srv, "/v1/contents/"+c.ID+"/publication", key, `{"published":false}`)
+	res := postJSON(t, srv, "/v1/contents/"+c.ID+"/publication", key, `{"published":false}`)
 	if res.Status != "invalid_input" {
 		t.Fatalf("gagal tanpa alasan harus ditolak, dapat %+v", res)
 	}
 }
 
-// TestAlurPenuh menelusuri satu konten dari unggah sampai tayang, lalu satu lagi
+// TestFullFlow menelusuri satu konten dari unggah sampai tayang, lalu satu lagi
 // yang gagal dan dijadwalkan ulang.
-func TestAlurPenuh(t *testing.T) {
-	srv := siapkan(t)
-	key := daftarkanApp(t, srv, "poster-1")
+func TestFullFlow(t *testing.T) {
+	srv := setup(t)
+	key := registerApp(t, srv, "poster-1")
 
-	lampau := time.Now().Add(-time.Hour).Format(time.RFC3339)
-	c := baca[konten](t, unggah(t, srv, key, lampau, "isi-berkas"))
+	past := time.Now().Add(-time.Hour).Format(time.RFC3339)
+	c := decode[content](t, upload(t, srv, key, past, "isi-berkas"))
 
 	if c.Size != int64(len("isi-berkas")) || c.Checksum == "" {
 		t.Fatalf("ukuran atau checksum tidak terisi: %+v", c)
@@ -330,117 +330,117 @@ func TestAlurPenuh(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	isi, _ := io.ReadAll(res.Body)
+	body, _ := io.ReadAll(res.Body)
 	_ = res.Body.Close()
-	if string(isi) != "isi-berkas" {
-		t.Fatalf("isi berkas berubah: %q", isi)
+	if string(body) != "isi-berkas" {
+		t.Fatalf("isi berkas berubah: %q", body)
 	}
 
-	kirimJSON(t, srv, "/v1/contents/"+c.ID+"/claim", key, `{}`)
+	postJSON(t, srv, "/v1/contents/"+c.ID+"/claim", key, `{}`)
 
-	tayang := baca[konten](t, kirimJSON(t, srv, "/v1/contents/"+c.ID+"/publication", key,
+	published := decode[content](t, postJSON(t, srv, "/v1/contents/"+c.ID+"/publication", key,
 		`{"published":true}`))
-	if tayang.Status != "published" {
-		t.Fatalf("harusnya published, dapat %q", tayang.Status)
+	if published.Status != "published" {
+		t.Fatalf("harusnya published, dapat %q", published.Status)
 	}
 
 	// Yang sudah tayang tidak boleh dijadwalkan ulang — itu akan memposting
 	// ulang konten yang sama.
-	ulang := kirimJSON(t, srv, "/v1/contents/"+c.ID+"/schedule", key,
+	again := postJSON(t, srv, "/v1/contents/"+c.ID+"/schedule", key,
 		`{"scheduled_at":"`+time.Now().Format(time.RFC3339)+`"}`)
-	if ulang.Status != "invalid_input" {
-		t.Fatalf("menjadwalkan ulang yang sudah tayang harus ditolak, dapat %+v", ulang)
+	if again.Status != "invalid_input" {
+		t.Fatalf("menjadwalkan ulang yang sudah tayang harus ditolak, dapat %+v", again)
 	}
 }
 
-func TestGagalBisaDijadwalkanUlang(t *testing.T) {
-	srv := siapkan(t)
-	key := daftarkanApp(t, srv, "poster-1")
+func TestFailedCanBeRescheduled(t *testing.T) {
+	srv := setup(t)
+	key := registerApp(t, srv, "poster-1")
 
-	lampau := time.Now().Add(-time.Hour).Format(time.RFC3339)
-	c := baca[konten](t, unggah(t, srv, key, lampau, "isi-berkas"))
+	past := time.Now().Add(-time.Hour).Format(time.RFC3339)
+	c := decode[content](t, upload(t, srv, key, past, "isi-berkas"))
 
-	kirimJSON(t, srv, "/v1/contents/"+c.ID+"/claim", key, `{}`)
-	gagal := baca[konten](t, kirimJSON(t, srv, "/v1/contents/"+c.ID+"/publication", key,
+	postJSON(t, srv, "/v1/contents/"+c.ID+"/claim", key, `{}`)
+	failed := decode[content](t, postJSON(t, srv, "/v1/contents/"+c.ID+"/publication", key,
 		`{"published":false,"reason":"token instagram kedaluwarsa"}`))
-	if gagal.Status != "failed" || gagal.FailureReason == nil {
-		t.Fatalf("harusnya failed beserta alasannya: %+v", gagal)
+	if failed.Status != "failed" || failed.FailureReason == nil {
+		t.Fatalf("harusnya failed beserta alasannya: %+v", failed)
 	}
 
 	// Dijadwalkan ulang ke masa lalu supaya langsung masuk antrean lagi.
-	kembali := baca[konten](t, kirimJSON(t, srv, "/v1/contents/"+c.ID+"/schedule", key,
-		`{"scheduled_at":"`+lampau+`"}`))
-	if kembali.Status != "scheduled" || kembali.ClaimedBy != nil || kembali.FailureReason != nil {
-		t.Fatalf("penjadwalan ulang harus membersihkan jejak percobaan sebelumnya: %+v", kembali)
+	back := decode[content](t, postJSON(t, srv, "/v1/contents/"+c.ID+"/schedule", key,
+		`{"scheduled_at":"`+past+`"}`))
+	if back.Status != "scheduled" || back.ClaimedBy != nil || back.FailureReason != nil {
+		t.Fatalf("penjadwalan ulang harus membersihkan jejak percobaan sebelumnya: %+v", back)
 	}
 
-	antrean := baca[[]konten](t, panggil(t, srv, "GET", "/v1/contents?scope=due", key, nil, ""))
-	if len(antrean) != 1 {
-		t.Fatalf("yang dijadwalkan ulang harus kembali ke antrean: %+v", antrean)
+	queue := decode[[]content](t, call(t, srv, "GET", "/v1/contents?scope=due", key, nil, ""))
+	if len(queue) != 1 {
+		t.Fatalf("yang dijadwalkan ulang harus kembali ke antrean: %+v", queue)
 	}
 }
 
-func TestArsipKeluarDariAntrean(t *testing.T) {
-	srv := siapkan(t)
-	key := daftarkanApp(t, srv, "poster-1")
+func TestArchivedLeavesQueue(t *testing.T) {
+	srv := setup(t)
+	key := registerApp(t, srv, "poster-1")
 
-	lampau := time.Now().Add(-time.Hour).Format(time.RFC3339)
-	c := baca[konten](t, unggah(t, srv, key, lampau, "isi-berkas"))
+	past := time.Now().Add(-time.Hour).Format(time.RFC3339)
+	c := decode[content](t, upload(t, srv, key, past, "isi-berkas"))
 
-	if res := kirimJSON(t, srv, "/v1/contents/"+c.ID+"/archival", key, `{}`); res.Code != 200 {
+	if res := postJSON(t, srv, "/v1/contents/"+c.ID+"/archival", key, `{}`); res.Code != 200 {
 		t.Fatalf("arsip gagal: %+v", res)
 	}
 
-	antrean := baca[[]konten](t, panggil(t, srv, "GET", "/v1/contents?scope=due", key, nil, ""))
-	if len(antrean) != 0 {
-		t.Fatalf("yang diarsipkan masih di antrean: %+v", antrean)
+	queue := decode[[]content](t, call(t, srv, "GET", "/v1/contents?scope=due", key, nil, ""))
+	if len(queue) != 0 {
+		t.Fatalf("yang diarsipkan masih di antrean: %+v", queue)
 	}
 
 	// Tapi masih terbaca. Servis ini tidak pernah menghapus apa pun.
-	if res := panggil(t, srv, "GET", "/v1/contents/"+c.ID, key, nil, ""); res.Code != 200 {
+	if res := call(t, srv, "GET", "/v1/contents/"+c.ID, key, nil, ""); res.Code != 200 {
 		t.Fatalf("yang diarsipkan harus tetap terbaca: %+v", res)
 	}
 }
 
-func TestJadwalWajibMenyebutZonaWaktu(t *testing.T) {
-	srv := siapkan(t)
-	key := daftarkanApp(t, srv, "poster-1")
+func TestScheduleRequiresTimeZone(t *testing.T) {
+	srv := setup(t)
+	key := registerApp(t, srv, "poster-1")
 
-	res := unggah(t, srv, key, "2026-09-12 09:00:00", "isi-berkas")
+	res := upload(t, srv, key, "2026-09-12 09:00:00", "isi-berkas")
 	if res.Status != "invalid_input" {
 		t.Fatalf("jadwal tanpa zona waktu harus ditolak, dapat %+v", res)
 	}
 }
 
-// TestBerkasTidakTertinggalSaatUnggahanDitolak menjaga janji yang paling mudah
+// TestNoOrphanFileWhenUploadRejected menjaga janji yang paling mudah
 // dilanggar: berkas ditulis lebih dulu, barisnya belakangan — jadi unggahan yang
 // ditolak sesudah berkasnya jadi harus ikut membersihkan berkasnya.
 //
 // Berkas yatim tidak muncul di mana pun. Ia cuma memakan disk sampai ada yang
 // menyadarinya bertahun-tahun kemudian.
-func TestBerkasTidakTertinggalSaatUnggahanDitolak(t *testing.T) {
-	srv, cfg := siapkanLengkap(t)
-	key := daftarkanApp(t, srv, "poster-1")
+func TestNoOrphanFileWhenUploadRejected(t *testing.T) {
+	srv, cfg := setupWith(t)
+	key := registerApp(t, srv, "poster-1")
 
-	lampau := time.Now().Add(-time.Hour).Format(time.RFC3339)
+	past := time.Now().Add(-time.Hour).Format(time.RFC3339)
 
 	// Berkas kosong baru ketahuan sesudah seluruh isinya mengalir — jadi
 	// berkasnya sudah terlanjur ditulis saat unggahannya ditolak.
-	res := unggah(t, srv, key, lampau, "")
+	res := upload(t, srv, key, past, "")
 	if res.Status != "invalid_input" {
 		t.Fatalf("berkas kosong harus ditolak, dapat %+v", res)
 	}
 
-	sisa, err := filepath.Glob(filepath.Join(cfg.FileDir(), "*"))
+	leftover, err := filepath.Glob(filepath.Join(cfg.FileDir(), "*"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(sisa) != 0 {
-		t.Fatalf("berkas tertinggal setelah unggahan ditolak: %v", sisa)
+	if len(leftover) != 0 {
+		t.Fatalf("berkas tertinggal setelah unggahan ditolak: %v", leftover)
 	}
 
-	daftar := baca[[]konten](t, panggil(t, srv, "GET", "/v1/contents?scope=all", key, nil, ""))
-	if len(daftar) != 0 {
-		t.Fatalf("unggahan yang ditolak tidak boleh meninggalkan baris: %+v", daftar)
+	labels := decode[[]content](t, call(t, srv, "GET", "/v1/contents?scope=all", key, nil, ""))
+	if len(labels) != 0 {
+		t.Fatalf("unggahan yang ditolak tidak boleh meninggalkan baris: %+v", labels)
 	}
 }

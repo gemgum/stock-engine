@@ -36,11 +36,11 @@ func One[T any](ctx context.Context, scan func(Scanner) (T, error), query string
 		return zero, err
 	}
 
-	hasil, err := scan(tx.QueryRowContext(ctx, query, args...))
+	result, err := scan(tx.QueryRowContext(ctx, query, args...))
 	if err != nil {
 		return zero, problem.FromDatabase(err)
 	}
-	return hasil, nil
+	return result, nil
 }
 
 // Many menjalankan kueri yang mengembalikan banyak baris.
@@ -60,15 +60,15 @@ func Many[T any](ctx context.Context, scan func(Scanner) (T, error), query strin
 	}
 	defer func() { _ = rows.Close() }()
 
-	hasil := []T{}
+	result := []T{}
 	for rows.Next() {
 		item, err := scan(rows)
 		if err != nil {
 			return nil, problem.FromDatabase(err)
 		}
-		hasil = append(hasil, item)
+		result = append(result, item)
 	}
-	return hasil, problem.FromDatabase(rows.Err())
+	return result, problem.FromDatabase(rows.Err())
 }
 
 // Exec menjalankan perintah yang tidak mengembalikan baris, dan melaporkan

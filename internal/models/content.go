@@ -136,23 +136,23 @@ const (
 // yang tidak dikenal adalah jenis salah yang tidak ketahuan sampai ada yang
 // membandingkan angkanya.
 func ParseScope(raw string) (Scope, error) {
-	dikenal := []Scope{ScopeDue, ScopeScheduled, ScopeClaimed, ScopePublished,
+	known := []Scope{ScopeDue, ScopeScheduled, ScopeClaimed, ScopePublished,
 		ScopeFailed, ScopeArchived, ScopeAll}
 
 	if raw == "" {
 		return ScopeAll, nil
 	}
-	for _, s := range dikenal {
+	for _, s := range known {
 		if Scope(raw) == s {
 			return s, nil
 		}
 	}
 
-	daftar := make([]string, len(dikenal))
-	for i, s := range dikenal {
-		daftar[i] = string(s)
+	labels := make([]string, len(known))
+	for i, s := range known {
+		labels[i] = string(s)
 	}
-	return "", fmt.Errorf("unknown scope %q. Known values: %s", raw, strings.Join(daftar, ", "))
+	return "", fmt.Errorf("unknown scope %q. Known values: %s", raw, strings.Join(labels, ", "))
 }
 
 type ContentRepository interface {

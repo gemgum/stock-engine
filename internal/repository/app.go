@@ -10,7 +10,7 @@ import (
 
 type App struct{}
 
-const kolomApp = `id, name, key_hash, created_at, revoked_at`
+const appColumns = `id, name, key_hash, created_at, revoked_at`
 
 func scanApp(row Scanner) (models.App, error) {
 	var (
@@ -32,17 +32,17 @@ func scanApp(row Scanner) (models.App, error) {
 
 func (App) Insert(ctx context.Context, name, keyHash string, at time.Time) (models.App, error) {
 	const q = `INSERT INTO apps (id, name, key_hash, created_at)
-		VALUES (?,?,?,?) RETURNING ` + kolomApp
+		VALUES (?,?,?,?) RETURNING ` + appColumns
 
 	return One(ctx, scanApp, q, models.NewID(), name, keyHash, Stamp(at))
 }
 
 func (App) List(ctx context.Context) ([]models.App, error) {
-	return Many(ctx, scanApp, `SELECT `+kolomApp+` FROM apps ORDER BY created_at DESC`)
+	return Many(ctx, scanApp, `SELECT `+appColumns+` FROM apps ORDER BY created_at DESC`)
 }
 
 func (App) Get(ctx context.Context, id string) (models.App, error) {
-	return One(ctx, scanApp, `SELECT `+kolomApp+` FROM apps WHERE id = ?`, id)
+	return One(ctx, scanApp, `SELECT `+appColumns+` FROM apps WHERE id = ?`, id)
 }
 
 // FindActiveByHash mencari yang belum dicabut.
@@ -51,7 +51,7 @@ func (App) Get(ctx context.Context, id string) (models.App, error) {
 // diperiksa di Go berarti ada satu jalur — yang lupa memeriksanya — di mana
 // kunci yang sudah dicabut tetap bekerja.
 func (App) FindActiveByHash(ctx context.Context, keyHash string) (models.App, error) {
-	const q = `SELECT ` + kolomApp + ` FROM apps WHERE key_hash = ? AND revoked_at IS NULL`
+	const q = `SELECT ` + appColumns + ` FROM apps WHERE key_hash = ? AND revoked_at IS NULL`
 	return One(ctx, scanApp, q, keyHash)
 }
 

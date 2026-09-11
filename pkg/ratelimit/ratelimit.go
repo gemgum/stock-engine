@@ -64,13 +64,13 @@ func (l *Limiter) Allow(caller string) bool {
 // Tanpa ini map-nya tumbuh selamanya, dan pemindai porta meninggalkan ribuan
 // baris yang tidak akan pernah dipakai lagi.
 func (l *Limiter) Sweep(olderThan time.Duration) {
-	batas := time.Now().Add(-olderThan)
+	cutoff := time.Now().Add(-olderThan)
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	for caller, b := range l.buckets {
-		if b.seen.Before(batas) {
+		if b.seen.Before(cutoff) {
 			delete(l.buckets, caller)
 		}
 	}

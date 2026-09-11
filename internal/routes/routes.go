@@ -43,15 +43,15 @@ type Options struct {
 // beberapa menit, bukan untuk API publik. Enam puluh per menit jauh di atas
 // pemakaian wajar dan tetap menghentikan skrip yang menembak beruntun.
 const (
-	umumJatah    = 60
-	umumPerMenit = 60
+	generalBurst     = 60
+	generalPerMinute = 60
 )
 
 func NewRouter(opts Options) http.Handler {
 	mux := http.NewServeMux()
 
-	umum := ratelimit.New(umumJatah, umumPerMenit)
-	sapu(umum)
+	general := ratelimit.New(generalBurst, generalPerMinute)
+	sweep(general)
 
 	open := func(fn httpx.Route) http.HandlerFunc {
 		return httpx.Wrap(opts.Logger, fn)
@@ -75,7 +75,7 @@ func NewRouter(opts Options) http.Handler {
 		middleware.Recover(opts.Logger),
 		middleware.CORS(opts.AllowedOrigins),
 		middleware.Log(opts.Logger),
-		middleware.RateLimit(umum, opts.Logger),
+		middleware.RateLimit(general, opts.Logger),
 	)
 }
 
@@ -101,11 +101,11 @@ func healthz(mux *http.ServeMux, open func(httpx.Route) http.HandlerFunc,
 	}))
 }
 
-// sapu membuang hitungan alamat yang sudah lama tidak datang.
+// sweep membuang hitungan alamat yang sudah lama tidak datang.
 //
 // Tanpa ini map-nya tumbuh selamanya, dan pemindai porta meninggalkan ribuan
 // baris yang tidak akan pernah dipakai lagi.
-func sapu(limiters ...*ratelimit.Limiter) {
+func sweep(limiters ...*ratelimit.Limiter) {
 	go func() {
 		for range time.Tick(10 * time.Minute) {
 			for _, l := range limiters {
