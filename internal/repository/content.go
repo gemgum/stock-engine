@@ -152,28 +152,29 @@ func (Content) Claim(ctx context.Context, id, appID string, at models.Time) (boo
 
 // SetPublication mencatat hasil akhir yang dilaporkan integrator.
 //
-// Cuma menerima konten yang sudah diclaim. Laporan atas konten yang belum
-// diambil berarti integrator memposting tanpa mengunci lebih dulu, dan itu
-// justru keadaan yang seluruh mekanisme claim ini cegah.
-func (Content) SetPublication(ctx context.Context, id string, status models.Status,
-	reason *string, at models.Time) error {
+// Dua syarat di dalam UPDATE-nya, dan keduanya wajib: kontennya sudah diclaim,
+// **dan** yang melapor adalah yang mengclaim.
+//
+// Syarat kedua yang menegakkan seluruh mekanisme claim. Tanpa itu, aplikasi
+// yang kalah lomba tinggal mengabaikan jawaban 409, tetap memposting, lalu
+// melapor — dan engine mencatatnya sebagai tayang. Claim jadi sekadar saran,
+// dan konten tetap bisa tayang dua kali.
+//
+// Mengembalikan false kalau tidak ada yang berubah; yang memilih kalimatnya
+// service, karena ia yang bisa melihat kenapa.
+func (Content) SetPublication(ctx context.Context, id, appID string, status models.Status,
+	reason *string, at models.Time) (bool, error) {
 
 	const q = `UPDATE contents SET status = ?, failure_reason = ?, published_at = ?
-		WHERE id = ? AND status = ?`
+		WHERE id = ? AND status = ? AND claimed_by = ?`
 
 	var publishedAt any
 	if status == models.StatusPublished {
 		publishedAt = Stamp(at)
 	}
 
-	changed, err := Exec(ctx, q, status, reason, publishedAt, id, models.StatusClaimed)
-	if err != nil {
-		return err
-	}
-	if changed == 0 {
-		return httpx.BadRequest("Only claimed content can be reported as published or failed.")
-	}
-	return nil
+	changed, err := Exec(ctx, q, status, reason, publishedAt, id, models.StatusClaimed, appID)
+	return changed > 0, err
 }
 
 // SetSchedule memindahkan jadwal dan mengembalikan kontennya ke antrean.

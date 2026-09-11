@@ -182,6 +182,20 @@ sampai ada yang membandingkan angkanya.**
 ada. Diam-diam mengembalikan daftar lain untuk permintaan yang meminta sesuatu
 yang tidak dikenal adalah jenis salah yang tidak ketahuan sampai terlambat.
 
+### Claim ditegakkan di laporannya, bukan di unduhannya
+
+Dua syarat ada di dalam `UPDATE` milik `/publication`: kontennya sudah diclaim,
+**dan** yang melapor adalah yang mengclaim. Syarat kedua yang menegakkan
+seluruh mekanisme — tanpa itu, yang kalah lomba tinggal mengabaikan `409`, tetap
+memposting, lalu melapor.
+
+`/file` sengaja **tidak** memeriksa claim. Mengunduh tidak mengubah keadaan,
+harus boleh diulang saat koneksi putus, dan panel perlu menampilkan pratinjau
+tanpa mengklaim. Menjaganya di sana juga tidak menutup apa pun: yang berniat
+memposting tanpa claim bisa saja menyimpan berkasnya lebih dulu. Yang benar-benar
+perlu dijaga adalah pernyataan "konten ini sudah dikerjakan", dan itu ada di
+`/publication`.
+
 ### Bentuk balasan daftar
 
 `GET /v1/contents` membalas `{items, total, limit, offset}`, bukan larik

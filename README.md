@@ -161,6 +161,15 @@ curl -X POST -H "$K" -H 'Content-Type: application/json' \
 antrean di detik yang sama akan memposting konten yang sama, dan tidak ada galat
 yang muncul — yang melapor pembacanya.
 
+Yang ditegakkan engine: **cuma aplikasi pemegang claim yang boleh melapor.**
+Yang belum mengclaim dijawab `400`; yang mengabaikan `409` lalu memposting
+sendiri tetap ditolak saat melapor, dengan `409 already_claimed`.
+
+**Mengunduh berkas tidak butuh claim**, dan itu disengaja: mengunduh tidak
+mengubah apa pun, boleh diulang kalau koneksinya putus, dan panel perlu
+menampilkan pratinjau tanpa mengklaim. Yang dijaga bukan siapa boleh melihat
+berkasnya, melainkan siapa boleh menyatakan konten ini sudah dikerjakan.
+
 ---
 
 ## Bentuk jawaban

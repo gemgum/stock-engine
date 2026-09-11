@@ -549,3 +549,34 @@ func TestTotalCountsBeyondThePage(t *testing.T) {
 		t.Fatalf("limit di luar batas harus dibetulkan jadi 50, dapat %d", fixed.Limit)
 	}
 }
+
+// TestOnlyTheClaimerCanReport menutup lubang yang membuat claim jadi sekadar
+// saran.
+//
+// Tanpa ini, aplikasi yang kalah lomba tinggal mengabaikan jawaban 409, tetap
+// memposting, lalu melapor — dan engine mencatatnya sebagai tayang. Kontennya
+// tayang dua kali, dan tidak ada galat yang muncul di mana pun.
+func TestOnlyTheClaimerCanReport(t *testing.T) {
+	srv := setup(t)
+	winner := registerApp(t, srv, "poster-1")
+	loser := registerApp(t, srv, "poster-2")
+
+	c := decode[content](t, upload(t, srv, winner, at(-time.Hour), "isi-berkas"))
+	postJSON(t, srv, "/v1/contents/"+c.ID+"/claim", winner, `{}`)
+
+	res := postJSON(t, srv, "/v1/contents/"+c.ID+"/publication", loser, `{"published":true}`)
+	if res.Status != "already_claimed" {
+		t.Fatalf("yang bukan pengclaim harus ditolak, dapat %+v", res)
+	}
+
+	// Kontennya tidak boleh ikut berubah gara-gara laporan yang ditolak.
+	after := decode[content](t, call(t, srv, "GET", "/v1/contents/"+c.ID, winner, nil, ""))
+	if after.Status != "claimed" {
+		t.Fatalf("status berubah oleh laporan yang ditolak: %+v", after)
+	}
+
+	// Yang mengclaim tetap bisa melapor.
+	if res := postJSON(t, srv, "/v1/contents/"+c.ID+"/publication", winner, `{"published":true}`); res.Code != 200 {
+		t.Fatalf("pengclaim harus bisa melapor: %+v", res)
+	}
+}

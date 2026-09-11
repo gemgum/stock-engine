@@ -72,6 +72,12 @@ lengkap di atas SQLite sungguhan, seperti `internal/api/api_test.go`.
 - **Berkas ditulis lebih dulu, barisnya belakangan.** Baris yang ada lebih dulu
   akan muncul di antrean integrator dengan berkas yang belum tentu jadi. Kalau
   barisnya gagal, berkasnya dibuang lagi.
+- **Cuma pemegang claim yang boleh melapor hasilnya.** Ini yang membuat claim
+  bukan sekadar saran: tanpa itu, aplikasi yang kalah lomba tinggal mengabaikan
+  jawaban 409, tetap memposting, lalu melapor — dan engine mencatatnya sebagai
+  tayang. Syaratnya ada di dalam `UPDATE`-nya, bukan diperiksa terpisah.
+  **Mengunduh berkas sengaja tidak butuh claim**: ia tidak mengubah apa pun,
+  harus boleh diulang saat koneksi putus, dan panel perlu pratinjau.
 - **Satu konten cuma boleh diambil satu aplikasi.** Syaratnya ada di dalam
   perintah `UPDATE`-nya, bukan diperiksa lebih dulu lalu ditulis. Kalau dipisah
   jadi dua langkah, dua integrator bisa sama-sama lolos pemeriksaan sebelum salah

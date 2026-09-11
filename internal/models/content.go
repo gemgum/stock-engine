@@ -202,7 +202,10 @@ type ContentRepository interface {
 	// bersamaan harus punya satu pemenang, dan yang memutuskan database.
 	Claim(ctx context.Context, id, appID string, at Time) (bool, error)
 
-	SetPublication(ctx context.Context, id string, status Status, reason *string, at Time) error
+	// SetPublication cuma menerima laporan dari aplikasi yang mengclaim
+	// kontennya. False berarti syaratnya tidak terpenuhi — belum diclaim, atau
+	// diclaim aplikasi lain.
+	SetPublication(ctx context.Context, id, appID string, status Status, reason *string, at Time) (bool, error)
 	SetSchedule(ctx context.Context, id string, at Time) error
 	Archive(ctx context.Context, id string, at Time) error
 }

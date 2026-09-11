@@ -203,11 +203,34 @@ func (s *ContentService) Publish(ctx context.Context, actor, id string, publishe
 
 	return run(ctx, s.base, "ContentService.Publish", actor,
 		func(ctx context.Context) (models.Content, error) {
-			if err := s.repo.SetPublication(ctx, id, status, storedReason, s.now()); err != nil {
+			recorded, err := s.repo.SetPublication(ctx, id, actor, status, storedReason, s.now())
+			if err != nil {
 				return models.Content{}, err
+			}
+			if !recorded {
+				return models.Content{}, s.whyNotReportable(ctx, id)
 			}
 			return s.repo.Get(ctx, id)
 		})
+}
+
+// whyNotReportable menjelaskan laporan yang ditolak.
+//
+// Dipanggil **hanya** saat laporannya gagal, jadi kueri tambahan ini tidak
+// membebani jalur yang normal. Sebabnya dipisah karena yang perlu dilakukan
+// pemanggil berbeda: yang belum mengclaim harus mengclaim dulu, sedangkan yang
+// kalah lomba harus berhenti — kontennya sedang dikerjakan orang lain, dan
+// memposting terus berarti tayang dua kali.
+func (s *ContentService) whyNotReportable(ctx context.Context, id string) error {
+	content, err := s.repo.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+
+	if content.Status == models.StatusClaimed {
+		return httpx.AlreadyClaimed()
+	}
+	return httpx.BadRequest("Only claimed content can be reported as published or failed.")
 }
 
 // Reschedule memindahkan jadwal, sekaligus mengembalikan kontennya ke antrean.
