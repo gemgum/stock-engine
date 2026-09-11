@@ -81,9 +81,13 @@ lengkap di atas SQLite sungguhan, seperti `internal/api/api_test.go`.
   tidak menghitung jadwalnya sendiri. Kalau tiap integrator menghitungnya versi
   masing-masing, beda zona waktu dan jeda cron membuat konten terlewat atau
   terkirim dua kali.
-- **Jadwal wajib menyebut zona waktu.** Tanggal tanpa zona ditafsirkan sebagai
-  waktu server, dan integrator di zona lain melihat kontennya meleset beberapa
-  jam tanpa pernah tahu kenapa. Disimpan sebagai RFC3339 UTC.
+- **Satu bentuk waktu, dan itu waktu server.** `2026-09-13 09:00:00`, tanpa zona
+  waktu — yang dikirim, yang tersimpan, dan yang dibalas semuanya sama persis.
+  Bentuk lain ditolak, tidak diterjemahkan diam-diam: jadwal yang salah tafsir
+  baru ketahuan saat kontennya tayang di jam yang keliru. Harganya, **zona waktu
+  VPS jadi bagian dari data** — setel sekali, lalu jangan diubah. Bentuknya
+  diputuskan di `internal/models/time.go`, dan tidak ada tempat lain yang
+  memformat waktu sendiri.
 - **Yang gagal tidak kembali sendiri ke antrean.** Konten yang ditolak platform
   biasanya ditolak lagi kalau dikirim ulang apa adanya, dan antrean yang mengisi
   ulang dirinya sendiri akan mencoba selamanya tanpa ada yang tahu. Yang

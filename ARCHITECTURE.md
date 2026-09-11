@@ -153,7 +153,7 @@ token OAuth tiap platform.
 | Alamat | Guna |
 |---|---|
 | `POST /v1/contents` | unggah berkas beserta jadwalnya |
-| `GET /v1/contents` | daftar; `?scope=due\|scheduled\|published\|failed` |
+| `GET /v1/contents` | daftar; `?scope=`, `?platform=`, `?limit=`, `?offset=` |
 | `GET /v1/contents/{id}` | satu konten |
 | `GET /v1/contents/{id}/file` | berkasnya |
 | `POST /v1/contents/{id}/schedule` | pindahkan jadwal |
@@ -181,6 +181,30 @@ sampai ada yang membandingkan angkanya.**
 `scope` bukan hiasan: nilai yang tidak dikenal ditolak dengan menyebut apa yang
 ada. Diam-diam mengembalikan daftar lain untuk permintaan yang meminta sesuatu
 yang tidak dikenal adalah jenis salah yang tidak ketahuan sampai terlambat.
+
+### Bentuk balasan daftar
+
+`GET /v1/contents` membalas `{items, total, limit, offset}`, bukan larik
+telanjang. `total` dihitung dengan penyaring yang **sama persis** dengan
+isinya — satu penyusun `WHERE` dipakai berdua di
+`repository.contentWhere`. Dua penyusun yang terpisah akan berbeda tipis cepat
+atau lambat, dan yang terjadi bukan galat melainkan total yang bohong.
+
+Keduanya juga diambil dalam **satu transaksi**. Kalau dipisah, unggahan yang
+masuk di antara keduanya membuat jumlah halaman salah tanpa ada yang menyadari.
+
+### Kenapa `due` dan `overdue` dua-duanya ada
+
+Keduanya memang bertumpuk, tapi menjawab pertanyaan yang berbeda, dan
+menggabungkannya jadi satu akan merusak salah satunya.
+
+`due` adalah antrean kerja: **sengaja tidak memuat** konten yang sedang dipegang
+aplikasi lain. `overdue` pertanyaan manusia — "kenapa konten ini tidak muncul?" —
+jadi yang macet di tangan integrator dan yang gagal justru harus ikut kelihatan.
+
+Kalau `overdue` dibuat sekadar alias `due`, konten yang tersangkut di satu
+integrator yang mati tidak akan muncul di daftar mana pun, dan tidak ada yang
+tahu sampai ada yang menghitung sendiri.
 
 ### Kenapa `claim` ada
 
@@ -278,6 +302,21 @@ memudahkan: satu keputusan, bukan dua.
 
 Pindahnya tidak gratis, dialek SQL-nya berbeda. Tapi yang ditulis ulang cuma
 `internal/repository/`, dan itu memang yang dijanjikan susunan foldernya.
+
+### Waktu
+
+Satu bentuk, `2026-09-13 09:00:00`, dan itu waktu server. Diputuskan di
+`internal/models/time.go` lewat tipe `models.Time`, yang membawa bentuk
+kirimannya sendiri — jadi tidak ada handler yang memformat waktunya sendiri lalu
+berbeda tipis dari yang lain.
+
+Disimpan apa adanya ke SQLite. Urutannya tetap benar saat dibandingkan sebagai
+teks, yang berarti `scheduled_at <= ?` bekerja tanpa fungsi konversi.
+
+**Harganya: zona waktu server jadi bagian dari data.** Mengubah zona VPS sesudah
+ada isinya menggeser arti seluruh jadwal yang sudah tersimpan. Setel sekali saat
+menyiapkan server, lalu jangan diubah — dan kalau suatu hari terpaksa diubah,
+isinya harus ikut dikonversi lewat migrasi.
 
 ### Migrasi
 

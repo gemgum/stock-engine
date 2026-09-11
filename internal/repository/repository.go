@@ -12,9 +12,9 @@ package repository
 import (
 	"context"
 	"database/sql"
-	"time"
 
 	"github.com/gemgum/stock-engine/internal/database"
+	"github.com/gemgum/stock-engine/internal/models"
 	"github.com/gemgum/stock-engine/internal/problem"
 )
 
@@ -96,14 +96,15 @@ func Exec(ctx context.Context, query string, args ...any) (int64, error) {
 // tempat bentuk simpannya diputuskan, supaya tidak ada kueri yang menuliskan
 // formatnya sendiri lalu berbeda tipis dari yang lain.
 
-const layout = time.RFC3339
+// Bentuknya `2026-09-13 09:00:00`, waktu server — diputuskan di
+// models.TimeLayout, dan dipakai apa adanya di sini supaya yang tersimpan di
+// database persis sama dengan yang dikirim dan dibalas.
 
-// Stamp mengubah waktu jadi teks yang disimpan. Selalu UTC — waktu bersona
-// lokal yang diurutkan sebagai teks akan salah urut begitu ada dua zona.
-func Stamp(t time.Time) string { return t.UTC().Format(layout) }
+// Stamp mengubah waktu jadi teks yang disimpan.
+func Stamp(t models.Time) string { return t.String() }
 
 // StampPtr sama, untuk kolom yang boleh kosong.
-func StampPtr(t *time.Time) any {
+func StampPtr(t *models.Time) any {
 	if t == nil {
 		return nil
 	}
@@ -111,14 +112,14 @@ func StampPtr(t *time.Time) any {
 }
 
 // ReadTime membaca kolom waktu yang wajib terisi.
-func ReadTime(raw string) (time.Time, error) { return time.Parse(layout, raw) }
+func ReadTime(raw string) (models.Time, error) { return models.ParseTime(raw) }
 
 // ReadTimePtr membaca kolom waktu yang boleh kosong.
-func ReadTimePtr(raw sql.NullString) (*time.Time, error) {
+func ReadTimePtr(raw sql.NullString) (*models.Time, error) {
 	if !raw.Valid || raw.String == "" {
 		return nil, nil
 	}
-	t, err := time.Parse(layout, raw.String)
+	t, err := models.ParseTime(raw.String)
 	if err != nil {
 		return nil, err
 	}

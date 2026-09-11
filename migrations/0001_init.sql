@@ -1,9 +1,13 @@
 -- Skema awal: aplikasi integrator dan konten.
 --
--- Waktu disimpan sebagai teks RFC3339 dalam UTC. SQLite tidak punya tipe waktu,
--- dan dari semua cara menyimpannya cuma ini yang urutannya benar saat
--- dibandingkan sebagai teks — yang berarti `scheduled_at <= ?` bekerja apa
--- adanya, tanpa fungsi konversi di tiap kueri.
+-- Waktu disimpan sebagai teks `2026-09-13 09:00:00`, waktu server. SQLite tidak
+-- punya tipe waktu, dan bentuk ini yang urutannya benar saat dibandingkan
+-- sebagai teks — yang berarti `scheduled_at <= ?` bekerja apa adanya, tanpa
+-- fungsi konversi di tiap kueri.
+--
+-- Konsekuensinya zona waktu server jadi bagian dari data: setel sekali saat
+-- menyiapkan server, lalu jangan diubah. Alasan lengkapnya di
+-- internal/models/time.go.
 
 CREATE TABLE IF NOT EXISTS apps (
   id         TEXT PRIMARY KEY,

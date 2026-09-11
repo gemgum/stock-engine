@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
-	"time"
 
 	"github.com/gemgum/stock-engine/internal/models"
 	"github.com/gemgum/stock-engine/internal/services"
@@ -88,7 +87,7 @@ func (h *ContentHandler) List(w http.ResponseWriter, r *http.Request) error {
 	limit, _ := strconv.Atoi(q.Get("limit"))
 	offset, _ := strconv.Atoi(q.Get("offset"))
 
-	rows, err := h.service.List(r.Context(), httpx.Actor(r), models.ContentFilter{
+	page, err := h.service.List(r.Context(), httpx.Actor(r), models.ContentFilter{
 		Scope:    scope,
 		Platform: q.Get("platform"),
 		Limit:    limit,
@@ -98,7 +97,7 @@ func (h *ContentHandler) List(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 
-	httpx.OK(w, "Contents loaded.", rows)
+	httpx.OK(w, "Contents loaded.", page)
 	return nil
 }
 
@@ -196,17 +195,18 @@ func (h *ContentHandler) Archive(w http.ResponseWriter, r *http.Request) error {
 
 // parseTime membaca jadwal dari kiriman.
 //
-// RFC3339 saja, dan zona waktunya wajib disebut. Tanggal tanpa zona akan
-// ditafsirkan sebagai waktu server, dan integrator di zona lain akan melihat
-// kontennya tayang beberapa jam meleset tanpa pernah tahu kenapa.
-func parseTime(raw string) (time.Time, error) {
+// Satu bentuk saja, `2026-09-12 09:00:00`, dan dibaca sebagai waktu server.
+// Menerima beberapa bentuk sekaligus terdengar ramah, tapi yang mengirim bentuk
+// lain tidak pernah tahu bentuknya diterjemahkan — dan salah tafsir jadwal baru
+// ketahuan saat kontennya tayang di jam yang keliru.
+func parseTime(raw string) (models.Time, error) {
 	if raw == "" {
-		return time.Time{}, httpx.BadRequest("Field 'scheduled_at' is required, in RFC3339 format (e.g. 2026-09-12T09:00:00+07:00).")
+		return models.Time{}, httpx.BadRequest("Field 'scheduled_at' is required, in 'YYYY-MM-DD HH:MM:SS' server time (e.g. 2026-09-12 09:00:00).")
 	}
 
-	t, err := time.Parse(time.RFC3339, raw)
+	t, err := models.ParseTime(raw)
 	if err != nil {
-		return time.Time{}, httpx.BadRequest("Field 'scheduled_at' must be RFC3339, including the time zone.").WithCause(err)
+		return models.Time{}, httpx.BadRequest("Field 'scheduled_at' must look like '2026-09-12 09:00:00' (server time).").WithCause(err)
 	}
 	return t, nil
 }

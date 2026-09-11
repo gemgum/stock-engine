@@ -5,7 +5,6 @@ import (
 	"io"
 	"log/slog"
 	"strings"
-	"time"
 
 	"github.com/gemgum/stock-engine/internal/database"
 	"github.com/gemgum/stock-engine/internal/models"
@@ -23,7 +22,7 @@ type ContentService struct {
 
 	// now bisa diganti saat pengujian. Seluruh servis ini soal waktu, dan
 	// menguji "sudah waktunya" dengan menunggu jam berganti bukan pengujian.
-	now func() time.Time
+	now func() models.Time
 }
 
 func NewContentService(db database.Runner, repo models.ContentRepository,
@@ -33,7 +32,7 @@ func NewContentService(db database.Runner, repo models.ContentRepository,
 		base:  base{db: db, logger: logger},
 		repo:  repo,
 		files: files,
-		now:   time.Now,
+		now:   models.Now,
 	}
 }
 
@@ -85,20 +84,40 @@ func validateUpload(in models.NewContent) error {
 		return httpx.BadRequest("The file has no name.")
 	}
 	if in.ScheduledAt.IsZero() {
-		return httpx.BadRequest("Field 'scheduled_at' is required, in RFC3339 format.")
+		return httpx.BadRequest("Field 'scheduled_at' is required, in 'YYYY-MM-DD HH:MM:SS' server time.")
 	}
 	return nil
 }
 
+// List mengembalikan satu halaman beserta jumlah seluruhnya.
+//
+// Keduanya diambil di dalam **satu transaksi**. Kalau dipisah, unggahan yang
+// masuk di antara keduanya membuat total tidak cocok dengan isinya — dan panel
+// menampilkan jumlah halaman yang salah tanpa ada galat yang muncul.
 func (s *ContentService) List(ctx context.Context, actor string,
-	filter models.ContentFilter) ([]models.Content, error) {
+	filter models.ContentFilter) (models.ContentPage, error) {
 
 	filter.Now = s.now()
 	filter.Limit, filter.Offset = pageLimits(filter.Limit, filter.Offset)
 
 	return run(ctx, s.base, "ContentService.List", actor,
-		func(ctx context.Context) ([]models.Content, error) {
-			return s.repo.List(ctx, filter)
+		func(ctx context.Context) (models.ContentPage, error) {
+			items, err := s.repo.List(ctx, filter)
+			if err != nil {
+				return models.ContentPage{}, err
+			}
+
+			total, err := s.repo.Count(ctx, filter)
+			if err != nil {
+				return models.ContentPage{}, err
+			}
+
+			return models.ContentPage{
+				Items:  items,
+				Total:  total,
+				Limit:  filter.Limit,
+				Offset: filter.Offset,
+			}, nil
 		})
 }
 
@@ -193,11 +212,11 @@ func (s *ContentService) Publish(ctx context.Context, actor, id string, publishe
 
 // Reschedule memindahkan jadwal, sekaligus mengembalikan kontennya ke antrean.
 func (s *ContentService) Reschedule(ctx context.Context, actor, id string,
-	at time.Time) (models.Content, error) {
+	at models.Time) (models.Content, error) {
 
 	if at.IsZero() {
 		return models.Content{}, logError(ctx, s.logger, "ContentService.Reschedule", actor,
-			httpx.BadRequest("Field 'scheduled_at' is required, in RFC3339 format."))
+			httpx.BadRequest("Field 'scheduled_at' is required, in 'YYYY-MM-DD HH:MM:SS' server time."))
 	}
 
 	return run(ctx, s.base, "ContentService.Reschedule", actor,

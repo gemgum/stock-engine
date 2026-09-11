@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"time"
 
 	"github.com/gemgum/stock-engine/internal/models"
 	"github.com/gemgum/stock-engine/pkg/httpx"
@@ -61,19 +60,21 @@ func (Content) Insert(ctx context.Context, in models.NewContent) (models.Content
 
 	return One(ctx, scanContent, q,
 		in.ID, in.Filename, in.Mime, in.Size, in.Checksum, in.Caption, in.Platform,
-		Stamp(in.ScheduledAt), models.StatusScheduled, in.UploadedBy, Stamp(time.Now()))
+		Stamp(in.ScheduledAt), models.StatusScheduled, in.UploadedBy, Stamp(models.Now()))
 }
 
 func (Content) Get(ctx context.Context, id string) (models.Content, error) {
 	return One(ctx, scanContent, `SELECT `+contentColumns+` FROM contents WHERE id = ?`, id)
 }
 
-// List menyusun penyaringnya dari scope.
+// contentWhere menyusun penyaringnya dari scope.
 //
-// Urutannya selalu menurut jadwal, bukan menurut waktu unggah: yang ditanyakan
-// integrator adalah "mana yang berikutnya tayang", dan itu urutan jadwal.
-func (Content) List(ctx context.Context, f models.ContentFilter) ([]models.Content, error) {
-	where := ""
+// Satu tempat, dipakai List dan Count. Kalau keduanya menyusun penyaringnya
+// sendiri-sendiri, cepat atau lambat keduanya berbeda tipis — dan yang terjadi
+// bukan galat melainkan total yang tidak cocok dengan isinya, yang cuma
+// ketahuan kalau ada yang menghitung barisnya sendiri.
+func contentWhere(f models.ContentFilter) (string, []any) {
+	var where string
 	var args []any
 
 	switch f.Scope {
@@ -83,6 +84,16 @@ func (Content) List(ctx context.Context, f models.ContentFilter) ([]models.Conte
 		// yang sedang diproses integrator lain.
 		where = `WHERE status = ? AND scheduled_at <= ?`
 		args = append(args, models.StatusScheduled, Stamp(f.Now))
+	case models.ScopeUnused:
+		// Belum tayang dan belum dibatalkan. Disebut lewat status yang **tidak**
+		// termasuk, bukan yang termasuk: status baru yang ditambah nanti otomatis
+		// terhitung stok, dan lupa menambahkannya di sini akan menyembunyikan
+		// konten yang sebenarnya masih punya giliran.
+		where = `WHERE status NOT IN (?, ?)`
+		args = append(args, models.StatusPublished, models.StatusArchived)
+	case models.ScopeOverdue:
+		where = `WHERE status NOT IN (?, ?) AND scheduled_at <= ?`
+		args = append(args, models.StatusPublished, models.StatusArchived, Stamp(f.Now))
 	case models.ScopeAll:
 		where = `WHERE 1 = 1`
 	default:
@@ -94,6 +105,15 @@ func (Content) List(ctx context.Context, f models.ContentFilter) ([]models.Conte
 		where += ` AND platform = ?`
 		args = append(args, f.Platform)
 	}
+	return where, args
+}
+
+// List mengembalikan satu halaman.
+//
+// Urutannya selalu menurut jadwal, bukan menurut waktu unggah: yang ditanyakan
+// integrator adalah "mana yang berikutnya tayang", dan itu urutan jadwal.
+func (Content) List(ctx context.Context, f models.ContentFilter) ([]models.Content, error) {
+	where, args := contentWhere(f)
 
 	// ponytail: pagination lewat offset. Cukup untuk antrean berukuran ribuan;
 	// ganti ke keysetnya (scheduled_at, id) kalau daftarnya tumbuh sampai
@@ -105,13 +125,24 @@ func (Content) List(ctx context.Context, f models.ContentFilter) ([]models.Conte
 	return Many(ctx, scanContent, q, args...)
 }
 
+// Count menghitung seluruh yang cocok, tanpa batas halamannya.
+func (Content) Count(ctx context.Context, f models.ContentFilter) (int, error) {
+	where, args := contentWhere(f)
+
+	return One(ctx, func(row Scanner) (int, error) {
+		var total int
+		err := row.Scan(&total)
+		return total, err
+	}, `SELECT count(*) FROM contents `+where, args...)
+}
+
 // Claim menang atau kalah dalam satu perintah.
 //
 // Syarat `status = 'scheduled'` ada di dalam UPDATE-nya, bukan diperiksa lebih
 // dulu lalu ditulis. Kalau dipisah jadi dua langkah, dua integrator bisa
 // sama-sama lolos pemeriksaan sebelum salah satunya sempat menulis — dan
 // keduanya memposting konten yang sama.
-func (Content) Claim(ctx context.Context, id, appID string, at time.Time) (bool, error) {
+func (Content) Claim(ctx context.Context, id, appID string, at models.Time) (bool, error) {
 	const q = `UPDATE contents SET status = ?, claimed_by = ?, claimed_at = ?
 		WHERE id = ? AND status = ?`
 
@@ -125,7 +156,7 @@ func (Content) Claim(ctx context.Context, id, appID string, at time.Time) (bool,
 // diambil berarti integrator memposting tanpa mengunci lebih dulu, dan itu
 // justru keadaan yang seluruh mekanisme claim ini cegah.
 func (Content) SetPublication(ctx context.Context, id string, status models.Status,
-	reason *string, at time.Time) error {
+	reason *string, at models.Time) error {
 
 	const q = `UPDATE contents SET status = ?, failure_reason = ?, published_at = ?
 		WHERE id = ? AND status = ?`
@@ -151,7 +182,7 @@ func (Content) SetPublication(ctx context.Context, id string, status models.Stat
 // bersamaan: yang memindahkan jadwal konten gagal selalu bermaksud
 // mencobanya lagi. Alamat terpisah untuk "kembalikan ke antrean" berarti dua
 // panggilan yang tidak pernah dipakai sendiri-sendiri.
-func (Content) SetSchedule(ctx context.Context, id string, at time.Time) error {
+func (Content) SetSchedule(ctx context.Context, id string, at models.Time) error {
 	const q = `UPDATE contents
 		SET scheduled_at = ?, status = ?, claimed_by = NULL, claimed_at = NULL,
 		    failure_reason = NULL
@@ -171,7 +202,7 @@ func (Content) SetSchedule(ctx context.Context, id string, at time.Time) error {
 //
 // Servis ini tidak pernah menghapus apa pun: yang batal tetap harus terbaca
 // riwayatnya, dan berkasnya tetap ada sampai ada yang sengaja membuangnya.
-func (Content) Archive(ctx context.Context, id string, at time.Time) error {
+func (Content) Archive(ctx context.Context, id string, at models.Time) error {
 	const q = `UPDATE contents SET status = ?, archived_at = ? WHERE id = ?`
 
 	changed, err := Exec(ctx, q, models.StatusArchived, Stamp(at), id)

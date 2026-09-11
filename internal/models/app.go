@@ -2,7 +2,6 @@ package models
 
 import (
 	"context"
-	"time"
 )
 
 // AdminID adalah id pemanggil yang memakai kunci induk.
@@ -18,11 +17,11 @@ const AdminID = "admin"
 // Kuncinya sendiri tidak pernah ada di sini. Yang disimpan cuma hashnya, dan
 // hash itu tidak pernah ikut keluar — lihat tag `json:"-"`.
 type App struct {
-	ID        string     `json:"id"`
-	Name      string     `json:"name"`
-	KeyHash   string     `json:"-"`
-	CreatedAt time.Time  `json:"created_at"`
-	RevokedAt *time.Time `json:"revoked_at"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	KeyHash   string `json:"-"`
+	CreatedAt Time   `json:"created_at"`
+	RevokedAt *Time  `json:"revoked_at"`
 }
 
 // CreatedApp adalah **satu-satunya saat kuncinya terlihat.**
@@ -36,12 +35,12 @@ type CreatedApp struct {
 
 type AppRepository interface {
 	List(ctx context.Context) ([]App, error)
-	Insert(ctx context.Context, name, keyHash string, at time.Time) (App, error)
+	Insert(ctx context.Context, name, keyHash string, at Time) (App, error)
 	Get(ctx context.Context, id string) (App, error)
 
 	// FindActiveByHash mencari yang belum dicabut. Yang sudah dicabut
 	// diperlakukan sama dengan yang tidak ada.
 	FindActiveByHash(ctx context.Context, keyHash string) (App, error)
 
-	SetRevoked(ctx context.Context, id string, at time.Time) error
+	SetRevoked(ctx context.Context, id string, at Time) error
 }

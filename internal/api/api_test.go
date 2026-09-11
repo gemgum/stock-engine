@@ -16,6 +16,7 @@ import (
 	"github.com/gemgum/stock-engine/internal/api"
 	"github.com/gemgum/stock-engine/internal/config"
 	"github.com/gemgum/stock-engine/internal/database"
+	"github.com/gemgum/stock-engine/internal/models"
 	"github.com/gemgum/stock-engine/internal/services"
 	"github.com/gemgum/stock-engine/migrations"
 )
@@ -71,6 +72,13 @@ func setupWith(t *testing.T) (*httptest.Server, config.Config) {
 	srv := httptest.NewServer(api.Build(db, files, cfg, logger))
 	t.Cleanup(srv.Close)
 	return srv, cfg
+}
+
+// at menyebut waktu server, sekian lama dari sekarang.
+//
+// Bentuknya `2026-09-13 09:00:00` — satu-satunya yang diterima servis ini.
+func at(d time.Duration) string {
+	return time.Now().Add(d).Format(models.TimeLayout)
 }
 
 type envelope struct {
@@ -146,6 +154,14 @@ func decode[T any](t *testing.T, res envelope) T {
 		t.Fatalf("data tidak terbaca: %v (%s)", err, res.Data)
 	}
 	return out
+}
+
+// page adalah bentuk balasan daftar: satu halaman beserta jumlah seluruhnya.
+type page struct {
+	Items  []content `json:"items"`
+	Total  int       `json:"total"`
+	Limit  int       `json:"limit"`
+	Offset int       `json:"offset"`
 }
 
 type content struct {
@@ -234,13 +250,13 @@ func TestScopeDue(t *testing.T) {
 	srv := setup(t)
 	key := registerApp(t, srv, "poster-1")
 
-	past := time.Now().Add(-time.Hour).Format(time.RFC3339)
-	tomorrow := time.Now().Add(24 * time.Hour).Format(time.RFC3339)
+	past := at(-time.Hour)
+	tomorrow := at(24 * time.Hour)
 
 	due := decode[content](t, upload(t, srv, key, past, "isi-berkas"))
 	upload(t, srv, key, tomorrow, "belum-waktunya")
 
-	queue := decode[[]content](t, call(t, srv, "GET", "/v1/contents?scope=due", key, nil, ""))
+	queue := decode[page](t, call(t, srv, "GET", "/v1/contents?scope=due", key, nil, "")).Items
 	if len(queue) != 1 || queue[0].ID != due.ID {
 		t.Fatalf("antrean harusnya berisi satu yang sudah waktunya, dapat %+v", queue)
 	}
@@ -252,7 +268,7 @@ func TestClaimWinsOnlyOnce(t *testing.T) {
 	first := registerApp(t, srv, "poster-1")
 	second := registerApp(t, srv, "poster-2")
 
-	past := time.Now().Add(-time.Hour).Format(time.RFC3339)
+	past := at(-time.Hour)
 	c := decode[content](t, upload(t, srv, first, past, "isi-berkas"))
 
 	won := postJSON(t, srv, "/v1/contents/"+c.ID+"/claim", first, `{}`)
@@ -267,7 +283,7 @@ func TestClaimWinsOnlyOnce(t *testing.T) {
 
 	// Yang sudah diambil tidak boleh muncul lagi di antrean, kalau tidak
 	// integrator ketiga akan memposting konten yang sama.
-	queue := decode[[]content](t, call(t, srv, "GET", "/v1/contents?scope=due", first, nil, ""))
+	queue := decode[page](t, call(t, srv, "GET", "/v1/contents?scope=due", first, nil, "")).Items
 	if len(queue) != 0 {
 		t.Fatalf("yang sudah diclaim masih muncul di antrean: %+v", queue)
 	}
@@ -287,7 +303,7 @@ func TestPublicationRequiresClaim(t *testing.T) {
 	srv := setup(t)
 	key := registerApp(t, srv, "poster-1")
 
-	past := time.Now().Add(-time.Hour).Format(time.RFC3339)
+	past := at(-time.Hour)
 	c := decode[content](t, upload(t, srv, key, past, "isi-berkas"))
 
 	res := postJSON(t, srv, "/v1/contents/"+c.ID+"/publication", key, `{"published":true}`)
@@ -300,7 +316,7 @@ func TestFailureRequiresReason(t *testing.T) {
 	srv := setup(t)
 	key := registerApp(t, srv, "poster-1")
 
-	past := time.Now().Add(-time.Hour).Format(time.RFC3339)
+	past := at(-time.Hour)
 	c := decode[content](t, upload(t, srv, key, past, "isi-berkas"))
 	postJSON(t, srv, "/v1/contents/"+c.ID+"/claim", key, `{}`)
 
@@ -316,7 +332,7 @@ func TestFullFlow(t *testing.T) {
 	srv := setup(t)
 	key := registerApp(t, srv, "poster-1")
 
-	past := time.Now().Add(-time.Hour).Format(time.RFC3339)
+	past := at(-time.Hour)
 	c := decode[content](t, upload(t, srv, key, past, "isi-berkas"))
 
 	if c.Size != int64(len("isi-berkas")) || c.Checksum == "" {
@@ -347,7 +363,7 @@ func TestFullFlow(t *testing.T) {
 	// Yang sudah tayang tidak boleh dijadwalkan ulang — itu akan memposting
 	// ulang konten yang sama.
 	again := postJSON(t, srv, "/v1/contents/"+c.ID+"/schedule", key,
-		`{"scheduled_at":"`+time.Now().Format(time.RFC3339)+`"}`)
+		`{"scheduled_at":"`+at(0)+`"}`)
 	if again.Status != "invalid_input" {
 		t.Fatalf("menjadwalkan ulang yang sudah tayang harus ditolak, dapat %+v", again)
 	}
@@ -357,7 +373,7 @@ func TestFailedCanBeRescheduled(t *testing.T) {
 	srv := setup(t)
 	key := registerApp(t, srv, "poster-1")
 
-	past := time.Now().Add(-time.Hour).Format(time.RFC3339)
+	past := at(-time.Hour)
 	c := decode[content](t, upload(t, srv, key, past, "isi-berkas"))
 
 	postJSON(t, srv, "/v1/contents/"+c.ID+"/claim", key, `{}`)
@@ -374,7 +390,7 @@ func TestFailedCanBeRescheduled(t *testing.T) {
 		t.Fatalf("penjadwalan ulang harus membersihkan jejak percobaan sebelumnya: %+v", back)
 	}
 
-	queue := decode[[]content](t, call(t, srv, "GET", "/v1/contents?scope=due", key, nil, ""))
+	queue := decode[page](t, call(t, srv, "GET", "/v1/contents?scope=due", key, nil, "")).Items
 	if len(queue) != 1 {
 		t.Fatalf("yang dijadwalkan ulang harus kembali ke antrean: %+v", queue)
 	}
@@ -384,14 +400,14 @@ func TestArchivedLeavesQueue(t *testing.T) {
 	srv := setup(t)
 	key := registerApp(t, srv, "poster-1")
 
-	past := time.Now().Add(-time.Hour).Format(time.RFC3339)
+	past := at(-time.Hour)
 	c := decode[content](t, upload(t, srv, key, past, "isi-berkas"))
 
 	if res := postJSON(t, srv, "/v1/contents/"+c.ID+"/archival", key, `{}`); res.Code != 200 {
 		t.Fatalf("arsip gagal: %+v", res)
 	}
 
-	queue := decode[[]content](t, call(t, srv, "GET", "/v1/contents?scope=due", key, nil, ""))
+	queue := decode[page](t, call(t, srv, "GET", "/v1/contents?scope=due", key, nil, "")).Items
 	if len(queue) != 0 {
 		t.Fatalf("yang diarsipkan masih di antrean: %+v", queue)
 	}
@@ -402,13 +418,20 @@ func TestArchivedLeavesQueue(t *testing.T) {
 	}
 }
 
-func TestScheduleRequiresTimeZone(t *testing.T) {
+// TestScheduleRejectsOtherFormats menjaga satu bentuk tetap satu bentuk.
+//
+// RFC3339 dulu yang dipakai, jadi integrator lama mungkin masih mengirimnya.
+// Ditolak terang-terangan lebih baik daripada diterjemahkan diam-diam: jadwal
+// yang salah tafsir baru ketahuan saat kontennya tayang di jam yang keliru.
+func TestScheduleRejectsOtherFormats(t *testing.T) {
 	srv := setup(t)
 	key := registerApp(t, srv, "poster-1")
 
-	res := upload(t, srv, key, "2026-09-12 09:00:00", "isi-berkas")
-	if res.Status != "invalid_input" {
-		t.Fatalf("jadwal tanpa zona waktu harus ditolak, dapat %+v", res)
+	for _, raw := range []string{"2026-09-12T09:00:00+07:00", "12/09/2026 09:00", "2026-09-12"} {
+		res := upload(t, srv, key, raw, "isi-berkas")
+		if res.Status != "invalid_input" {
+			t.Fatalf("bentuk %q harus ditolak, dapat %+v", raw, res)
+		}
 	}
 }
 
@@ -422,7 +445,7 @@ func TestNoOrphanFileWhenUploadRejected(t *testing.T) {
 	srv, cfg := setupWith(t)
 	key := registerApp(t, srv, "poster-1")
 
-	past := time.Now().Add(-time.Hour).Format(time.RFC3339)
+	past := at(-time.Hour)
 
 	// Berkas kosong baru ketahuan sesudah seluruh isinya mengalir — jadi
 	// berkasnya sudah terlanjur ditulis saat unggahannya ditolak.
@@ -439,8 +462,90 @@ func TestNoOrphanFileWhenUploadRejected(t *testing.T) {
 		t.Fatalf("berkas tertinggal setelah unggahan ditolak: %v", leftover)
 	}
 
-	labels := decode[[]content](t, call(t, srv, "GET", "/v1/contents?scope=all", key, nil, ""))
+	labels := decode[page](t, call(t, srv, "GET", "/v1/contents?scope=all", key, nil, "")).Items
 	if len(labels) != 0 {
 		t.Fatalf("unggahan yang ditolak tidak boleh meninggalkan baris: %+v", labels)
+	}
+}
+
+// TestScopeUnusedAndOverdue memisahkan dua pertanyaan yang gampang tertukar:
+// "stok apa yang masih punya giliran" dan "apa yang terlewat jadwalnya".
+//
+// Keduanya berbeda dari ScopeDue — antrean kerja integrator, yang sengaja tidak
+// memuat konten yang sedang dipegang aplikasi lain.
+func TestScopeUnusedAndOverdue(t *testing.T) {
+	srv := setup(t)
+	key := registerApp(t, srv, "poster-1")
+
+	past := at(-time.Hour)
+
+	// Satu sudah tayang, satu sedang dipegang, satu masih menunggu jadwal.
+	done := decode[content](t, upload(t, srv, key, past, "sudah-tayang"))
+	postJSON(t, srv, "/v1/contents/"+done.ID+"/claim", key, `{}`)
+	postJSON(t, srv, "/v1/contents/"+done.ID+"/publication", key, `{"published":true}`)
+
+	held := decode[content](t, upload(t, srv, key, past, "sedang-dipegang"))
+	postJSON(t, srv, "/v1/contents/"+held.ID+"/claim", key, `{}`)
+
+	upload(t, srv, key, at(24*time.Hour), "besok")
+
+	byScope := func(scope string) []content {
+		return decode[page](t, call(t, srv, "GET", "/v1/contents?scope="+scope, key, nil, "")).Items
+	}
+
+	// Yang sudah tayang keluar dari stok; yang dipegang integrator masih stok.
+	if unused := byScope("unused"); len(unused) != 2 {
+		t.Fatalf("stok harusnya dua (dipegang + besok), dapat %+v", unused)
+	}
+
+	// Terlewat jadwal: yang dipegang ikut, yang besok tidak, yang sudah tayang
+	// tidak.
+	overdue := byScope("overdue")
+	if len(overdue) != 1 || overdue[0].ID != held.ID {
+		t.Fatalf("terlewat jadwal harusnya cuma yang dipegang, dapat %+v", overdue)
+	}
+
+	// Antrean kerja tetap kosong — yang dipegang tidak boleh diambil dua kali.
+	if due := byScope("due"); len(due) != 0 {
+		t.Fatalf("antrean kerja harusnya kosong, dapat %+v", due)
+	}
+}
+
+// TestTotalCountsBeyondThePage adalah alasan field total ada.
+//
+// Panel tidak bisa menyimpulkan jumlah halaman dari jumlah baris yang diterima:
+// halaman yang kebetulan pas penuh tidak bisa dibedakan dari halaman yang masih
+// ada sambungannya.
+func TestTotalCountsBeyondThePage(t *testing.T) {
+	srv := setup(t)
+	key := registerApp(t, srv, "poster-1")
+
+	for i := 0; i < 5; i++ {
+		upload(t, srv, key, at(time.Duration(i)*time.Hour), "isi-berkas")
+	}
+
+	first := decode[page](t, call(t, srv, "GET", "/v1/contents?limit=2", key, nil, ""))
+	if len(first.Items) != 2 || first.Total != 5 {
+		t.Fatalf("halaman berisi 2 dari total 5, dapat %d baris total %d", len(first.Items), first.Total)
+	}
+
+	// Halaman berikutnya tidak mengulang isi halaman pertama.
+	second := decode[page](t, call(t, srv, "GET", "/v1/contents?limit=2&offset=2", key, nil, ""))
+	if second.Total != 5 || second.Offset != 2 || second.Items[0].ID == first.Items[0].ID {
+		t.Fatalf("halaman kedua salah: %+v", second)
+	}
+
+	// Total ikut penyaringnya, bukan jumlah seluruh tabel. Kalau tidak, panel
+	// menampilkan halaman kosong untuk scope yang isinya sedikit.
+	byScope := decode[page](t, call(t, srv, "GET", "/v1/contents?scope=published", key, nil, ""))
+	if byScope.Total != 0 {
+		t.Fatalf("total harus ikut scope, dapat %d", byScope.Total)
+	}
+
+	// Limit yang tidak masuk akal dibetulkan, dan nilai betulannya dipantulkan
+	// supaya panel tidak salah menghitung halaman.
+	fixed := decode[page](t, call(t, srv, "GET", "/v1/contents?limit=9999", key, nil, ""))
+	if fixed.Limit != 50 {
+		t.Fatalf("limit di luar batas harus dibetulkan jadi 50, dapat %d", fixed.Limit)
 	}
 }

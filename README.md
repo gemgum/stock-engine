@@ -76,8 +76,62 @@ tidak ada `PATCH`, `PUT`, atau `DELETE`; alasannya di `ARCHITECTURE.md` §4.
 | `GET /v1/me` | siapa saya |
 | `GET /healthz` | terbuka, ikut memeriksa database |
 
-`scope` yang dikenal: `due`, `scheduled`, `claimed`, `published`, `failed`,
-`archived`, `all` (bawaan). Nilai lain ditolak dengan menyebut yang ada.
+| `scope=` | Isinya |
+|---|---|
+| `all` (bawaan) | semuanya |
+| `unused` | belum tayang dan belum dibatalkan — **stok yang masih punya giliran** |
+| `due` | sudah waktunya dan belum diambil siapa pun — **antrean kerja integrator** |
+| `overdue` | jadwalnya lewat tapi tidak pernah tayang — **yang terlewat** |
+| `scheduled` | menunggu jadwalnya |
+| `claimed` | sedang dipegang satu aplikasi |
+| `published` | sudah tayang |
+| `failed` | gagal tayang, alasannya ada di `failure_reason` |
+| `archived` | dibatalkan |
+
+Bisa digabung dengan `?platform=`, `?limit=`, dan `?offset=`.
+
+Balasannya satu halaman, bukan larik telanjang:
+
+```json
+{
+  "items": [ ... ],
+  "total": 128,
+  "limit": 50,
+  "offset": 0
+}
+```
+
+`total` jumlah **seluruh** yang cocok dengan penyaringnya, bukan yang ada di
+halaman ini. Itu yang dipakai menghitung jumlah halaman — jumlah baris yang
+diterima tidak cukup, karena halaman yang kebetulan pas penuh tidak bisa
+dibedakan dari halaman yang masih ada sambungannya.
+
+`limit` dan `offset` dipantulkan kembali karena servis membetulkan nilai yang
+tidak masuk akal: `limit=9999` dilayani sebagai 50.
+
+Nilai lain ditolak dengan menyebut yang ada — daftar kosong untuk permintaan yang
+salah ketik adalah jenis salah yang tidak ketahuan sampai ada yang membandingkan
+angkanya.
+
+**`due` dan `overdue` menjawab pertanyaan yang berbeda.** `due` antrean kerja:
+sengaja tidak memuat konten yang sedang dipegang aplikasi lain, supaya tidak ada
+yang tayang dua kali. `overdue` pertanyaan manusia — "kenapa konten ini tidak
+muncul?" — jadi yang macet di tangan integrator dan yang gagal justru ikut
+kelihatan.
+
+### Waktu
+
+Satu bentuk saja, dan itu **waktu server**:
+
+```
+2026-09-13 09:00:00
+```
+
+Tanpa zona waktu, tanpa huruf `T`. Bentuk yang dikirim, yang tersimpan, dan yang
+dibalas sama persis — tidak ada konversi yang perlu kamu pikirkan. Bentuk lain
+(termasuk RFC3339 `2026-09-13T09:00:00+07:00`) **ditolak**, bukan
+diterjemahkan diam-diam: jadwal yang salah tafsir baru ketahuan saat kontennya
+tayang di jam yang keliru.
 
 ---
 

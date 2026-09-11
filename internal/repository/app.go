@@ -3,7 +3,6 @@ package repository
 import (
 	"context"
 	"database/sql"
-	"time"
 
 	"github.com/gemgum/stock-engine/internal/models"
 )
@@ -30,7 +29,7 @@ func scanApp(row Scanner) (models.App, error) {
 	return a, err
 }
 
-func (App) Insert(ctx context.Context, name, keyHash string, at time.Time) (models.App, error) {
+func (App) Insert(ctx context.Context, name, keyHash string, at models.Time) (models.App, error) {
 	const q = `INSERT INTO apps (id, name, key_hash, created_at)
 		VALUES (?,?,?,?) RETURNING ` + appColumns
 
@@ -62,7 +61,7 @@ func (App) FindActiveByHash(ctx context.Context, keyHash string) (models.App, er
 // sudah hilang tidak bisa dibaca lagi.
 //
 // Aman diulang: mencabut yang sudah dicabut tidak mengubah waktu cabutnya.
-func (App) SetRevoked(ctx context.Context, id string, at time.Time) error {
+func (App) SetRevoked(ctx context.Context, id string, at models.Time) error {
 	const q = `UPDATE apps SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL`
 
 	_, err := Exec(ctx, q, Stamp(at), id)

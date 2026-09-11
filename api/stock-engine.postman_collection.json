@@ -5,11 +5,26 @@
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
-    { "key": "base_url", "value": "http://localhost:8080" },
-    { "key": "admin_key", "value": "" },
-    { "key": "app_key", "value": "" },
-    { "key": "content_id", "value": "" },
-    { "key": "app_id", "value": "" }
+    {
+      "key": "base_url",
+      "value": "http://localhost:8080"
+    },
+    {
+      "key": "admin_key",
+      "value": ""
+    },
+    {
+      "key": "app_key",
+      "value": ""
+    },
+    {
+      "key": "content_id",
+      "value": ""
+    },
+    {
+      "key": "app_id",
+      "value": ""
+    }
   ],
   "item": [
     {
@@ -20,7 +35,15 @@
           "request": {
             "method": "GET",
             "header": [],
-            "url": { "raw": "{{base_url}}/healthz", "host": ["{{base_url}}"], "path": ["healthz"] },
+            "url": {
+              "raw": "{{base_url}}/healthz",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "healthz"
+              ]
+            },
             "description": "Terbuka tanpa kunci. Ikut menyentuh database, jadi 'sehat' di sini benar-benar berarti bisa melayani."
           }
         }
@@ -35,11 +58,29 @@
           "request": {
             "method": "POST",
             "header": [
-              { "key": "Authorization", "value": "Bearer {{admin_key}}" },
-              { "key": "Content-Type", "value": "application/json" }
+              {
+                "key": "Authorization",
+                "value": "Bearer {{admin_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
             ],
-            "body": { "mode": "raw", "raw": "{\n  \"name\": \"poster-instagram\"\n}" },
-            "url": { "raw": "{{base_url}}/v1/apps", "host": ["{{base_url}}"], "path": ["v1", "apps"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"poster-instagram\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/apps",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "apps"
+              ]
+            },
             "description": "Kuncinya muncul di balasan ini SATU KALI. Salin sekarang — yang disimpan cuma hashnya."
           }
         },
@@ -47,8 +88,22 @@
           "name": "GET /v1/apps",
           "request": {
             "method": "GET",
-            "header": [{ "key": "Authorization", "value": "Bearer {{admin_key}}" }],
-            "url": { "raw": "{{base_url}}/v1/apps", "host": ["{{base_url}}"], "path": ["v1", "apps"] }
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{admin_key}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/apps",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "apps"
+              ]
+            }
           }
         },
         {
@@ -56,14 +111,30 @@
           "request": {
             "method": "POST",
             "header": [
-              { "key": "Authorization", "value": "Bearer {{admin_key}}" },
-              { "key": "Content-Type", "value": "application/json" }
+              {
+                "key": "Authorization",
+                "value": "Bearer {{admin_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
             ],
-            "body": { "mode": "raw", "raw": "{}" },
+            "body": {
+              "mode": "raw",
+              "raw": "{}"
+            },
             "url": {
               "raw": "{{base_url}}/v1/apps/{{app_id}}/revocation",
-              "host": ["{{base_url}}"],
-              "path": ["v1", "apps", "{{app_id}}", "revocation"]
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "apps",
+                "{{app_id}}",
+                "revocation"
+              ]
             },
             "description": "Kuncinya berhenti bekerja. Kontennya tidak ikut hilang — gudangnya satu."
           }
@@ -78,17 +149,33 @@
           "name": "1. GET /v1/contents?scope=due",
           "request": {
             "method": "GET",
-            "header": [{ "key": "Authorization", "value": "Bearer {{app_key}}" }],
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{app_key}}"
+              }
+            ],
             "url": {
               "raw": "{{base_url}}/v1/contents?scope=due&platform=instagram",
-              "host": ["{{base_url}}"],
-              "path": ["v1", "contents"],
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "contents"
+              ],
               "query": [
-                { "key": "scope", "value": "due" },
-                { "key": "platform", "value": "instagram" }
+                {
+                  "key": "scope",
+                  "value": "due"
+                },
+                {
+                  "key": "platform",
+                  "value": "instagram"
+                }
               ]
             },
-            "description": "Jangan hitung 'sudah waktunya' sendiri. Beda zona waktu dan jeda cron bikin konten terlewat atau dobel."
+            "description": "Jangan hitung 'sudah waktunya' sendiri. Beda zona waktu dan jeda cron bikin konten terlewat atau dobel. Balasannya {\"items\": [...], \"total\": N}: konten yang perlu diproses ada di dalam items."
           }
         },
         {
@@ -96,14 +183,30 @@
           "request": {
             "method": "POST",
             "header": [
-              { "key": "Authorization", "value": "Bearer {{app_key}}" },
-              { "key": "Content-Type", "value": "application/json" }
+              {
+                "key": "Authorization",
+                "value": "Bearer {{app_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
             ],
-            "body": { "mode": "raw", "raw": "{}" },
+            "body": {
+              "mode": "raw",
+              "raw": "{}"
+            },
             "url": {
               "raw": "{{base_url}}/v1/contents/{{content_id}}/claim",
-              "host": ["{{base_url}}"],
-              "path": ["v1", "contents", "{{content_id}}", "claim"]
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "contents",
+                "{{content_id}}",
+                "claim"
+              ]
             },
             "description": "409 already_claimed berarti aplikasi lain sudah mengambilnya. Lewati, ambil berikutnya — itu bukan galat."
           }
@@ -112,11 +215,23 @@
           "name": "3. GET /v1/contents/{id}/file",
           "request": {
             "method": "GET",
-            "header": [{ "key": "Authorization", "value": "Bearer {{app_key}}" }],
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{app_key}}"
+              }
+            ],
             "url": {
               "raw": "{{base_url}}/v1/contents/{{content_id}}/file",
-              "host": ["{{base_url}}"],
-              "path": ["v1", "contents", "{{content_id}}", "file"]
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "contents",
+                "{{content_id}}",
+                "file"
+              ]
             },
             "description": "Mendukung header Range, jadi video bisa diambil sebagian."
           }
@@ -126,8 +241,14 @@
           "request": {
             "method": "POST",
             "header": [
-              { "key": "Authorization", "value": "Bearer {{app_key}}" },
-              { "key": "Content-Type", "value": "application/json" }
+              {
+                "key": "Authorization",
+                "value": "Bearer {{app_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
             ],
             "body": {
               "mode": "raw",
@@ -135,8 +256,15 @@
             },
             "url": {
               "raw": "{{base_url}}/v1/contents/{{content_id}}/publication",
-              "host": ["{{base_url}}"],
-              "path": ["v1", "contents", "{{content_id}}", "publication"]
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "contents",
+                "{{content_id}}",
+                "publication"
+              ]
             },
             "description": "published true tanpa reason, atau false beserta reason. Gagal tanpa alasan ditolak."
           }
@@ -147,32 +275,226 @@
       "name": "Konten",
       "item": [
         {
+          "name": "GET /v1/contents (semua + paginasi)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{app_key}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/contents?scope=all&limit=50&offset=0",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "contents"
+              ],
+              "query": [
+                {
+                  "key": "scope",
+                  "value": "all"
+                },
+                {
+                  "key": "limit",
+                  "value": "50"
+                },
+                {
+                  "key": "offset",
+                  "value": "0"
+                }
+              ]
+            },
+            "description": "Seluruh isi gudang, halaman demi halaman.\n\nBalasannya satu halaman: {\"items\": [...], \"total\": 128, \"limit\": 50, \"offset\": 0}. Pakai total untuk menghitung jumlah halaman — jumlah baris yang diterima tidak cukup, karena halaman yang kebetulan pas penuh tidak bisa dibedakan dari yang masih ada sambungannya.\n\nSemua nilai scope bisa digabung dengan platform, limit, dan offset."
+          }
+        },
+        {
+          "name": "GET /v1/contents?scope=unused",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{app_key}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/contents?scope=unused",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "contents"
+              ],
+              "query": [
+                {
+                  "key": "scope",
+                  "value": "unused"
+                }
+              ]
+            },
+            "description": "Stok yang masih punya giliran: belum tayang dan belum dibatalkan. Lebih luas dari scope=scheduled — yang sedang dipegang integrator dan yang gagal semalam juga belum terpakai.\n\nBalasannya satu halaman: {\"items\": [...], \"total\": 128, \"limit\": 50, \"offset\": 0}. Pakai total untuk menghitung jumlah halaman — jumlah baris yang diterima tidak cukup, karena halaman yang kebetulan pas penuh tidak bisa dibedakan dari yang masih ada sambungannya.\n\nSemua nilai scope bisa digabung dengan platform, limit, dan offset."
+          }
+        },
+        {
+          "name": "GET /v1/contents?scope=published",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{app_key}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/contents?scope=published",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "contents"
+              ],
+              "query": [
+                {
+                  "key": "scope",
+                  "value": "published"
+                }
+              ]
+            },
+            "description": "Yang sudah tayang.\n\nBalasannya satu halaman: {\"items\": [...], \"total\": 128, \"limit\": 50, \"offset\": 0}. Pakai total untuk menghitung jumlah halaman — jumlah baris yang diterima tidak cukup, karena halaman yang kebetulan pas penuh tidak bisa dibedakan dari yang masih ada sambungannya.\n\nSemua nilai scope bisa digabung dengan platform, limit, dan offset."
+          }
+        },
+        {
+          "name": "GET /v1/contents?scope=overdue",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{app_key}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/contents?scope=overdue",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "contents"
+              ],
+              "query": [
+                {
+                  "key": "scope",
+                  "value": "overdue"
+                }
+              ]
+            },
+            "description": "Jadwalnya lewat tapi tidak pernah tayang — 'kenapa konten ini tidak muncul?'. Berbeda dari scope=due: yang macet di tangan integrator dan yang gagal justru ikut kelihatan di sini.\n\nBalasannya satu halaman: {\"items\": [...], \"total\": 128, \"limit\": 50, \"offset\": 0}. Pakai total untuk menghitung jumlah halaman — jumlah baris yang diterima tidak cukup, karena halaman yang kebetulan pas penuh tidak bisa dibedakan dari yang masih ada sambungannya.\n\nSemua nilai scope bisa digabung dengan platform, limit, dan offset."
+          }
+        },
+        {
+          "name": "GET /v1/contents?scope=failed",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{app_key}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/contents?scope=failed",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "contents"
+              ],
+              "query": [
+                {
+                  "key": "scope",
+                  "value": "failed"
+                }
+              ]
+            },
+            "description": "Gagal tayang. Alasannya ada di field failure_reason.\n\nBalasannya satu halaman: {\"items\": [...], \"total\": 128, \"limit\": 50, \"offset\": 0}. Pakai total untuk menghitung jumlah halaman — jumlah baris yang diterima tidak cukup, karena halaman yang kebetulan pas penuh tidak bisa dibedakan dari yang masih ada sambungannya.\n\nSemua nilai scope bisa digabung dengan platform, limit, dan offset."
+          }
+        },
+        {
           "name": "POST /v1/contents",
           "request": {
             "method": "POST",
-            "header": [{ "key": "Authorization", "value": "Bearer {{app_key}}" }],
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{app_key}}"
+              }
+            ],
             "body": {
               "mode": "formdata",
               "formdata": [
-                { "key": "file", "type": "file", "src": [] },
-                { "key": "scheduled_at", "value": "2026-09-12T09:00:00+07:00", "type": "text" },
-                { "key": "caption", "value": "halo dunia", "type": "text" },
-                { "key": "platform", "value": "instagram", "type": "text" }
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": []
+                },
+                {
+                  "key": "scheduled_at",
+                  "value": "2026-09-12 09:00:00",
+                  "type": "text"
+                },
+                {
+                  "key": "caption",
+                  "value": "halo dunia",
+                  "type": "text"
+                },
+                {
+                  "key": "platform",
+                  "value": "instagram",
+                  "type": "text"
+                }
               ]
             },
-            "url": { "raw": "{{base_url}}/v1/contents", "host": ["{{base_url}}"], "path": ["v1", "contents"] },
-            "description": "scheduled_at wajib RFC3339 LENGKAP dengan zona waktu. Tanpa zona, jadwalnya ditafsirkan sebagai waktu server."
+            "url": {
+              "raw": "{{base_url}}/v1/contents",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "contents"
+              ]
+            },
+            "description": "scheduled_at wajib berbentuk YYYY-MM-DD HH:MM:SS dan dibaca sebagai waktu server. Bentuk lain ditolak, tidak diterjemahkan diam-diam."
           }
         },
         {
           "name": "GET /v1/contents/{id}",
           "request": {
             "method": "GET",
-            "header": [{ "key": "Authorization", "value": "Bearer {{app_key}}" }],
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{app_key}}"
+              }
+            ],
             "url": {
               "raw": "{{base_url}}/v1/contents/{{content_id}}",
-              "host": ["{{base_url}}"],
-              "path": ["v1", "contents", "{{content_id}}"]
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "contents",
+                "{{content_id}}"
+              ]
             }
           }
         },
@@ -181,14 +503,30 @@
           "request": {
             "method": "POST",
             "header": [
-              { "key": "Authorization", "value": "Bearer {{app_key}}" },
-              { "key": "Content-Type", "value": "application/json" }
+              {
+                "key": "Authorization",
+                "value": "Bearer {{app_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
             ],
-            "body": { "mode": "raw", "raw": "{\n  \"scheduled_at\": \"2026-09-13T09:00:00+07:00\"\n}" },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"scheduled_at\": \"2026-09-13 09:00:00\"\n}"
+            },
             "url": {
               "raw": "{{base_url}}/v1/contents/{{content_id}}/schedule",
-              "host": ["{{base_url}}"],
-              "path": ["v1", "contents", "{{content_id}}", "schedule"]
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "contents",
+                "{{content_id}}",
+                "schedule"
+              ]
             },
             "description": "Memindahkan jadwal sekaligus mengembalikan kontennya ke antrean. Yang sudah published ditolak."
           }
@@ -198,14 +536,30 @@
           "request": {
             "method": "POST",
             "header": [
-              { "key": "Authorization", "value": "Bearer {{app_key}}" },
-              { "key": "Content-Type", "value": "application/json" }
+              {
+                "key": "Authorization",
+                "value": "Bearer {{app_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
             ],
-            "body": { "mode": "raw", "raw": "{}" },
+            "body": {
+              "mode": "raw",
+              "raw": "{}"
+            },
             "url": {
               "raw": "{{base_url}}/v1/contents/{{content_id}}/archival",
-              "host": ["{{base_url}}"],
-              "path": ["v1", "contents", "{{content_id}}", "archival"]
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "contents",
+                "{{content_id}}",
+                "archival"
+              ]
             },
             "description": "Keluar dari antrean, tapi tetap terbaca. Servis ini tidak pernah menghapus apa pun."
           }
@@ -214,11 +568,26 @@
           "name": "GET /v1/me",
           "request": {
             "method": "GET",
-            "header": [{ "key": "Authorization", "value": "Bearer {{app_key}}" }],
-            "url": { "raw": "{{base_url}}/v1/me", "host": ["{{base_url}}"], "path": ["v1", "me"] }
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{app_key}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/me",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "me"
+              ]
+            }
           }
         }
-      ]
+      ],
+      "description": "Mengisi dan melihat isi gudang. Alamat daftarnya cuma satu — GET /v1/contents — dan yang membedakan pertanyaannya cuma parameter scope."
     }
   ]
 }

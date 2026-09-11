@@ -4,7 +4,6 @@ import (
 	"context"
 	"log/slog"
 	"strings"
-	"time"
 
 	"github.com/gemgum/stock-engine/internal/database"
 	"github.com/gemgum/stock-engine/internal/models"
@@ -25,7 +24,7 @@ type AppService struct {
 	// jalan masuk saat belum ada satu pun aplikasi terdaftar.
 	adminKey string
 
-	now func() time.Time
+	now func() models.Time
 }
 
 func NewAppService(db database.Runner, repo models.AppRepository, adminKey string,
@@ -35,7 +34,7 @@ func NewAppService(db database.Runner, repo models.AppRepository, adminKey strin
 		base:     base{db: db, logger: logger},
 		repo:     repo,
 		adminKey: adminKey,
-		now:      time.Now,
+		now:      models.Now,
 	}
 }
 
