@@ -22,7 +22,13 @@ type Files struct {
 	dir string
 }
 
+// NewFiles menyimpan foldernya sebagai path mutlak, karena Path ikut dikirim
+// ke Redis Stream — dan path relatif tidak berarti apa-apa bagi proses lain.
 func NewFiles(dir string) (Files, error) {
+	dir, err := filepath.Abs(dir)
+	if err != nil {
+		return Files{}, err
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return Files{}, err
 	}
@@ -57,6 +63,13 @@ func (f Files) Save(id string, src io.Reader) (size int64, checksum string, err 
 		err = cerr
 	}
 	if err != nil {
+		return 0, "", err
+	}
+
+	// CreateTemp membuatnya 0600. Grup ikut boleh membaca, supaya integrator di
+	// mesin yang sama bisa membuka berkasnya lewat `path` di Redis Stream —
+	// asal user-nya masuk grup pemilik folder ini. Yang lain tetap tidak.
+	if err = os.Chmod(tmpName, 0o640); err != nil {
 		return 0, "", err
 	}
 

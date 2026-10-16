@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 )
@@ -15,17 +16,22 @@ import (
 // Pelepasan claim mengurus ambang yang dihitung dalam jam. Menjalankannya
 // sekali sehari berarti konten yang tersangkut jam sembilan pagi baru kembali
 // ke antrean besok — jauh sesudah jadwalnya tidak ada artinya lagi.
+//
+// Pengabaran ke stream tiap menit, karena jadwal ditulis sampai menitnya:
+// konten jam 09:00 yang baru dikabarkan 09:05 sudah terlambat lima menit.
 const (
 	purgeInterval   = 24 * time.Hour
 	releaseInterval = 5 * time.Minute
+	streamInterval  = time.Minute
 )
 
 // Janitor menjalankan pekerjaan yang tidak dipicu permintaan siapa pun.
 //
-// Ada tiga sekarang: membuang berkas yang lewat umurnya, membuang potongan
-// unggahan yang ditinggalkan servis yang mati mendadak, dan mengembalikan claim
-// yang ditinggalkan integrator yang mati. Aturannya tiga, dan berlaku untuk yang berikutnya kalau
-// memang ada:
+// Ada empat sekarang: membuang berkas yang lewat umurnya, membuang potongan
+// unggahan yang ditinggalkan servis yang mati mendadak, mengembalikan claim
+// yang ditinggalkan integrator yang mati, dan mengabarkan konten yang sudah
+// waktunya ke Redis Stream. Aturannya tiga, dan berlaku untuk yang berikutnya
+// kalau memang ada:
 //
 //   - **Lewat service, bukan langsung ke database.** Galatnya tercatat dengan
 //     nama operasinya seperti permintaan HTTP mana pun.
@@ -44,6 +50,7 @@ type Housekeeper interface {
 	PurgeFiles(ctx context.Context) (int, error)
 	PurgeStaleUploads(ctx context.Context) (int, error)
 	ReleaseStuckClaims(ctx context.Context) (int, error)
+	StreamDue(ctx context.Context) (int, error)
 }
 
 func NewJanitor(housekeeper Housekeeper, logger *slog.Logger) *Janitor {
@@ -66,6 +73,9 @@ func (j *Janitor) Run(ctx context.Context) {
 	release := time.NewTicker(releaseInterval)
 	defer release.Stop()
 
+	stream := time.NewTicker(streamInterval)
+	defer stream.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -77,6 +87,8 @@ func (j *Janitor) Run(ctx context.Context) {
 			_ = j.jalankan(ctx, "sapuan berkas sementara", j.housekeeper.PurgeStaleUploads)
 		case <-release.C:
 			_ = j.jalankan(ctx, "pelepasan claim", j.housekeeper.ReleaseStuckClaims)
+		case <-stream.C:
+			_ = j.jalankan(ctx, "pengabaran stream", j.housekeeper.StreamDue)
 		}
 	}
 }
@@ -89,14 +101,23 @@ func (j *Janitor) Run(ctx context.Context) {
 // Urutannya pelepasan dulu, sapuan berkas belakangan: claim yang baru dilepas
 // kembali jadi stok, dan stok tidak pernah disapu. Dibalik pun hasilnya sama,
 // tapi urutan ini yang tidak perlu dijelaskan dua kali.
+//
+// Pengabaran stream sesudah pelepasan, supaya yang baru dilepas ikut
+// dikabarkan di jalan yang sama. Galatnya tidak menghentikan sapuan: Redis yang
+// mati tidak boleh membuat disk ikut penuh.
 func (j *Janitor) Once(ctx context.Context) error {
 	if err := j.jalankan(ctx, "pelepasan claim", j.housekeeper.ReleaseStuckClaims); err != nil {
 		return err
 	}
+	streamErr := j.jalankan(ctx, "pengabaran stream", j.housekeeper.StreamDue)
+
 	if err := j.jalankan(ctx, "sapuan berkas", j.housekeeper.PurgeFiles); err != nil {
 		return err
 	}
-	return j.jalankan(ctx, "sapuan berkas sementara", j.housekeeper.PurgeStaleUploads)
+	if err := j.jalankan(ctx, "sapuan berkas sementara", j.housekeeper.PurgeStaleUploads); err != nil {
+		return err
+	}
+	return streamErr
 }
 
 // jalankan mencatat galatnya, lalu meneruskannya.
@@ -110,7 +131,14 @@ func (j *Janitor) jalankan(ctx context.Context, nama string,
 
 	_, err := kerja(ctx)
 	if err != nil && ctx.Err() == nil {
-		j.logger.Error(nama+" gagal", "error", err.Error())
+		// Galat httpx cuma menyebut kalimat untuk klien; sebab aslinya — Redis
+		// yang menolak, disk yang penuh — ada di dalamnya, dan itu yang perlu
+		// dibaca orang yang membuka log.
+		attrs := []any{"error", err.Error()}
+		if cause := errors.Unwrap(err); cause != nil {
+			attrs = append(attrs, "cause", cause.Error())
+		}
+		j.logger.Error(nama+" gagal", attrs...)
 	}
 	return err
 }

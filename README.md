@@ -47,6 +47,9 @@ ikut ke server tidak bisa diam-diam mengembalikan pengaturan lama.
 | `CLAIM_TIMEOUT_HOURS` | `2` | ambang melepas claim yang ditinggalkan. `0` = jangan pernah dilepas |
 | `TRUSTED_PROXIES` | `127.0.0.0/8,::1/128` | dari mana header alamat asli dipercaya |
 | `ALLOWED_ORIGINS` | `http://localhost:3000` | alamat panel web yang boleh memanggil |
+| `REDIS_ADDR` | kosong | Redis tempat konten yang sudah waktunya dikabarkan, misalnya `127.0.0.1:6379`. Kosong = tidak dipakai. Lihat **Integrasi lewat Redis Stream** |
+| `REDIS_PASSWORD` | kosong | diisi kalau Redis-nya memakai `requirepass` |
+| `REDIS_STREAM` | `content.ready` | nama stream-nya |
 
 Kalau `ADMIN_KEY` kurang dari 32 karakter, servis **berhenti saat start** dan
 menyebut namanya — bukan jalan setengah lalu menolak permintaan di lapangan.
@@ -158,6 +161,7 @@ kelihatan.
   "failure_reason": null,
   "archived_at": null,
   "file_removed_at": null,
+  "streamed_at": null,
   "uploaded_by": "aecbce013903ed3cd3e7a932",
   "created_at": "2026-09-11 22:37:42"
 }
@@ -175,6 +179,7 @@ kelihatan.
 | `failure_reason` | alasan yang **dilaporkan integrator**, bukan karangan servis. Kosong kalau kegagalannya tidak pernah dilaporkan siapa pun |
 | `archived_at` | terisi saat dibatalkan lewat `/archival` |
 | `file_removed_at` | terisi kalau berkasnya sudah dibuang karena umur. Barisnya tetap; berkasnya tidak bisa diunduh lagi |
+| `streamed_at` | terisi saat konten dikabarkan ke Redis Stream, kosong lagi begitu ia kembali ke antrean. Selalu kosong kalau Redis tidak dipakai |
 | `uploaded_by` | aplikasi yang mengunggahnya. Catatan saja — gudangnya satu, semua aplikasi melihat semuanya |
 
 ### Mengunggah
@@ -184,7 +189,7 @@ Multipart, bukan JSON berisi base64: base64 membengkakkan video 200MB jadi 267MB
 | Field | Wajib | Isinya |
 |---|---|---|
 | `file` | ya | berkasnya |
-| `scheduled_at` | ya | `YYYY-MM-DD HH:MM:SS`, waktu server |
+| `scheduled_at` | ya | `YYYY-MM-DD HH:MM:SS`, waktu server, **paling cepat 1 jam dari saat diunggah**. `/schedule` tidak terikat batas ini |
 | `caption` | tidak | teks bebas |
 | `platform` | tidak | teks bebas, dipakai menyaring `?platform=` |
 
@@ -245,6 +250,104 @@ berkasnya, melainkan siapa boleh menyatakan konten ini sudah dikerjakan.
 
 ---
 
+## Integrasi lewat Redis Stream
+
+Pilihan kedua selain `?scope=due`, untuk integrator yang berjalan **di VPS yang
+sama**. Servis yang mengabarkan konten yang sudah waktunya; integrator tidak
+perlu bertanya berkala, dan berkasnya dibaca langsung dari disk.
+
+Nyalakan dengan mengisi `REDIS_ADDR`. Kosong berarti tidak ada yang dikabarkan,
+dan sisa servis tetap sama.
+
+**Tiap menit**, servis mengirim satu event untuk setiap konten yang sudah
+waktunya dan belum diambil — isinya sama persis dengan `?scope=due`. Satu konten
+dikabarkan sekali, dan dikabarkan **lagi** kalau ia kembali ke antrean: dipindah
+jadwalnya lewat `/schedule`, atau claimnya dilepas karena ditinggalkan.
+
+### Isi satu event
+
+| Field | Isinya |
+|---|---|
+| `id` | id konten — dipakai untuk claim dan lapor |
+| `filename` · `mime` · `size` · `checksum` | keterangan berkasnya, sama dengan di API |
+| `caption` · `platform` | sama dengan di API |
+| `scheduled_at` | jadwalnya, waktu server |
+| `path` | letak berkasnya di disk, path mutlak. Namanya cuma id, tanpa ekstensi — jenisnya dilihat dari `mime` |
+
+### Yang dikerjakan integrator
+
+```
+# sekali saja: buat consumer group. "0" supaya event yang sudah ada ikut terbaca
+XGROUP CREATE content.ready tiktok 0 MKSTREAM
+
+# tunggu event — terpicu begitu ada, tanpa bertanya berkala
+XREADGROUP GROUP tiktok worker-1 BLOCK 0 STREAMS content.ready >
+```
+
+Lalu untuk tiap event:
+
+1. **Claim lewat API**: `POST /v1/contents/{id}/claim`. Dijawab `409` berarti
+   lewati.
+2. **XACK** event-nya — berhasil claim maupun `409`.
+3. **Baca berkasnya** dari `path`, **sesudah** claim. Cocokkan dengan `checksum`
+   kalau mau yakin utuh.
+4. Unggah ke platformnya.
+5. **Lapor hasilnya lewat API**: `POST /v1/contents/{id}/publication`.
+
+Jadi API tetap dipanggil **dua kali per konten** — claim dan lapor. Keduanya
+tidak bisa dilewati: claim yang mencegah konten tayang dua kali, dan cuma
+pemegang claim yang boleh melapor.
+
+### Yang perlu diketahui
+
+**Event bisa datang dua kali.** Kalau servis mati tepat sesudah mengirim, event
+yang sama dikirim lagi. Claim kedua dijawab `409` — lewati saja.
+
+**Event bisa basi.** Konten yang sudah dikabarkan lalu dipindah ke besok masih
+punya event lamanya, dan claim-nya tetap berhasil. Karena itu **pakai
+`scheduled_at` dari jawaban claim, bukan dari event.** Kalau ternyata masih di
+masa depan, jangan diposting — biarkan saja: claimnya dilepas setelah
+`CLAIM_TIMEOUT_HOURS`, dan kontennya dikabarkan lagi saat jadwal barunya tiba.
+
+**XACK segera sesudah claim, bukan sesudah lapor.** Worker yang mati di tengah
+tidak perlu mengulang event-nya: claimnya dilepas setelah
+`CLAIM_TIMEOUT_HOURS`, dan kontennya dikabarkan ulang sebagai event baru.
+Mengulang event lama tidak menolong — claim kedua dari aplikasi yang sama tetap
+`409`.
+
+**Redis yang mati tidak menghilangkan apa pun.** Konten yang belum sempat
+dikabarkan tidak ditandai, dan dikirim begitu Redis kembali. Sementara itu ia
+tetap ada di `?scope=due`. Galatnya tercatat di log servis tiap menit.
+
+**Stream dipangkas sekitar 10.000 event.** Yang terpangkas sebelum dibaca tetap
+ada di `?scope=due`.
+
+### Izin membaca berkas
+
+Berkas konten ditulis dengan izin `0640`: pemiliknya user servis, **grupnya
+boleh membaca**, yang lain tidak. User aplikasi integrator harus masuk grup itu:
+
+```bash
+usermod -aG stock-engine www-data     # sesuaikan nama grup servis dan user integrator
+```
+
+Berkas yang diunggah sebelum rilis ini masih `0600` — buka sekali:
+
+```bash
+chmod 640 /var/lib/stock-engine/files/*
+```
+
+Yang dibuka cuma `files/`. Database jangan ikut terbaca grup itu:
+
+```bash
+chmod 600 /var/lib/stock-engine/stock.db*
+```
+
+Berkasnya cuma untuk dibaca. Integrator tidak pernah menulis, memindahkan, atau
+menghapus apa pun di folder itu.
+
+---
+
 ## Bentuk jawaban
 
 Setiap balasan, berhasil maupun gagal, punya empat field yang sama:
@@ -298,11 +401,14 @@ mengembalikannya manusia, lewat `/schedule`.
 
 ---
 
-## Tiga pekerjaan yang jalan sendiri
+## Empat pekerjaan yang jalan sendiri
 
 Tidak ada alamat untuk keduanya, dan tidak ada tombol. Kalau menghapus dan
 membereskan harus diingat manusia, disknya tetap penuh dan kontennya tetap
 tersangkut.
+
+**Konten yang sudah waktunya dikabarkan ke Redis Stream**, tiap menit, kalau
+`REDIS_ADDR` diisi. Rinciannya di **Integrasi lewat Redis Stream**.
 
 **Claim yang ditinggalkan dilepas** setelah `CLAIM_TIMEOUT_HOURS` (bawaan 2
 jam), diperiksa tiap 5 menit. Integrator yang mati sesudah mengclaim membuat

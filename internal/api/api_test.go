@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"mime/multipart"
@@ -29,6 +30,32 @@ const adminKey = "kunci-induk-untuk-pengujian-yang-panjangnya-cukup"
 // janitors menghubungkan server uji dengan sapuannya, supaya uji yang perlu
 // menjalankan sapuan tidak harus merakit servisnya sendiri.
 var janitors = map[*httptest.Server]*api.Janitor{}
+
+// configs menyimpan pengaturan tiap server uji, supaya helper yang perlu
+// menyentuh database langsung tidak harus merakit servisnya sendiri.
+var configs = map[*httptest.Server]config.Config{}
+
+// streams menyimpan pengganti Redis Stream tiap server uji.
+var streams = map[*httptest.Server]*recorder{}
+
+// recorder mencatat event yang dikirim, sebagai pengganti Redis. Bisa disuruh
+// menolak, untuk menguji Redis yang mati.
+type recorder struct {
+	events []map[string]string
+	down   bool
+}
+
+func (r *recorder) Add(_ context.Context, fields ...string) error {
+	if r.down {
+		return errors.New("redis mati")
+	}
+	event := map[string]string{}
+	for i := 0; i+1 < len(fields); i += 2 {
+		event[fields[i]] = fields[i+1]
+	}
+	r.events = append(r.events, event)
+	return nil
+}
 
 // setup merakit servis lengkap di atas SQLite sungguhan.
 //
@@ -86,13 +113,17 @@ func setupTuned(t *testing.T, ubah func(*config.Config)) (*httptest.Server, conf
 	// uji membuat kegagalan sungguhan susah ditemukan.
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	handler, janitor := api.Build(db, files, cfg, logger)
+	events := &recorder{}
+
+	handler, janitor := api.Build(db, files, events, cfg, logger)
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
 
 	// Janitor tidak dinyalakan di sini: uji yang butuh sapuan memanggil
 	// janitor.Once sendiri, supaya hasilnya tidak bergantung pada waktu.
 	janitors[srv] = janitor
+	configs[srv] = cfg
+	streams[srv] = events
 
 	return srv, cfg
 }
@@ -169,6 +200,40 @@ func upload(t *testing.T, srv *httptest.Server, key, scheduledAt, body string) e
 	return call(t, srv, "POST", "/v1/contents", key, &buf, mw.FormDataContentType())
 }
 
+// uploadDue mengunggah konten yang sudah waktunya tayang.
+//
+// Jadwal di masa lalu ditolak saat unggah — jaraknya minimal satu jam — jadi
+// kontennya diunggah untuk dua jam lagi, lalu jadwalnya dimundurkan langsung
+// di database.
+func uploadDue(t *testing.T, srv *httptest.Server, key, body string) envelope {
+	t.Helper()
+
+	res := upload(t, srv, key, at(2*time.Hour), body)
+	if res.Code == http.StatusCreated {
+		makeDue(t, srv, decode[content](t, res).ID)
+	}
+	return res
+}
+
+// makeDue memundurkan jadwal satu konten ke sejam yang lalu.
+//
+// Lewat SQL karena tidak ada alamat yang boleh melakukannya: /schedule menolak
+// jadwal yang kurang dari sejam dari sekarang.
+func makeDue(t *testing.T, srv *httptest.Server, id string) {
+	t.Helper()
+
+	db, err := sql.Open("sqlite", configs[srv].DatabasePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	if _, err := db.Exec(`UPDATE contents SET scheduled_at = ? WHERE id = ?`,
+		at(-time.Hour), id); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func decode[T any](t *testing.T, res envelope) T {
 	t.Helper()
 
@@ -195,6 +260,7 @@ type content struct {
 	ClaimedBy     *string `json:"claimed_by"`
 	FailureReason *string `json:"failure_reason"`
 	FileRemovedAt *string `json:"file_removed_at"`
+	StreamedAt    *string `json:"streamed_at"`
 }
 
 // registerApp menerbitkan satu kunci aplikasi lewat kunci induk.
@@ -274,10 +340,9 @@ func TestScopeDue(t *testing.T) {
 	srv := setup(t)
 	key := registerApp(t, srv, "poster-1")
 
-	past := at(-time.Hour)
 	tomorrow := at(24 * time.Hour)
 
-	due := decode[content](t, upload(t, srv, key, past, "isi-berkas"))
+	due := decode[content](t, uploadDue(t, srv, key, "isi-berkas"))
 	upload(t, srv, key, tomorrow, "belum-waktunya")
 
 	queue := decode[page](t, call(t, srv, "GET", "/v1/contents?scope=due", key, nil, "")).Items
@@ -292,8 +357,7 @@ func TestClaimWinsOnlyOnce(t *testing.T) {
 	first := registerApp(t, srv, "poster-1")
 	second := registerApp(t, srv, "poster-2")
 
-	past := at(-time.Hour)
-	c := decode[content](t, upload(t, srv, first, past, "isi-berkas"))
+	c := decode[content](t, uploadDue(t, srv, first, "isi-berkas"))
 
 	won := postJSON(t, srv, "/v1/contents/"+c.ID+"/claim", first, `{}`)
 	if won.Code != 200 || decode[content](t, won).Status != "claimed" {
@@ -327,8 +391,7 @@ func TestPublicationRequiresClaim(t *testing.T) {
 	srv := setup(t)
 	key := registerApp(t, srv, "poster-1")
 
-	past := at(-time.Hour)
-	c := decode[content](t, upload(t, srv, key, past, "isi-berkas"))
+	c := decode[content](t, uploadDue(t, srv, key, "isi-berkas"))
 
 	res := postJSON(t, srv, "/v1/contents/"+c.ID+"/publication", key, `{"published":true}`)
 	if res.Status != "invalid_input" {
@@ -340,8 +403,7 @@ func TestFailureRequiresReason(t *testing.T) {
 	srv := setup(t)
 	key := registerApp(t, srv, "poster-1")
 
-	past := at(-time.Hour)
-	c := decode[content](t, upload(t, srv, key, past, "isi-berkas"))
+	c := decode[content](t, uploadDue(t, srv, key, "isi-berkas"))
 	postJSON(t, srv, "/v1/contents/"+c.ID+"/claim", key, `{}`)
 
 	res := postJSON(t, srv, "/v1/contents/"+c.ID+"/publication", key, `{"published":false}`)
@@ -356,8 +418,7 @@ func TestFullFlow(t *testing.T) {
 	srv := setup(t)
 	key := registerApp(t, srv, "poster-1")
 
-	past := at(-time.Hour)
-	c := decode[content](t, upload(t, srv, key, past, "isi-berkas"))
+	c := decode[content](t, uploadDue(t, srv, key, "isi-berkas"))
 
 	if c.Size != int64(len("isi-berkas")) || c.Checksum == "" {
 		t.Fatalf("ukuran atau checksum tidak terisi: %+v", c)
@@ -387,7 +448,7 @@ func TestFullFlow(t *testing.T) {
 	// Yang sudah tayang tidak boleh dijadwalkan ulang — itu akan memposting
 	// ulang konten yang sama.
 	again := postJSON(t, srv, "/v1/contents/"+c.ID+"/schedule", key,
-		`{"scheduled_at":"`+at(0)+`"}`)
+		`{"scheduled_at":"`+at(2*time.Hour)+`"}`)
 	if again.Status != "invalid_input" {
 		t.Fatalf("menjadwalkan ulang yang sudah tayang harus ditolak, dapat %+v", again)
 	}
@@ -397,8 +458,7 @@ func TestFailedCanBeRescheduled(t *testing.T) {
 	srv := setup(t)
 	key := registerApp(t, srv, "poster-1")
 
-	past := at(-time.Hour)
-	c := decode[content](t, upload(t, srv, key, past, "isi-berkas"))
+	c := decode[content](t, uploadDue(t, srv, key, "isi-berkas"))
 
 	postJSON(t, srv, "/v1/contents/"+c.ID+"/claim", key, `{}`)
 	failed := decode[content](t, postJSON(t, srv, "/v1/contents/"+c.ID+"/publication", key,
@@ -407,12 +467,14 @@ func TestFailedCanBeRescheduled(t *testing.T) {
 		t.Fatalf("harusnya failed beserta alasannya: %+v", failed)
 	}
 
-	// Dijadwalkan ulang ke masa lalu supaya langsung masuk antrean lagi.
 	back := decode[content](t, postJSON(t, srv, "/v1/contents/"+c.ID+"/schedule", key,
-		`{"scheduled_at":"`+past+`"}`))
+		`{"scheduled_at":"`+at(2*time.Hour)+`"}`))
 	if back.Status != "scheduled" || back.ClaimedBy != nil || back.FailureReason != nil {
 		t.Fatalf("penjadwalan ulang harus membersihkan jejak percobaan sebelumnya: %+v", back)
 	}
+
+	// Jadwal barunya dimajukan ke masa lalu supaya langsung masuk antrean lagi.
+	makeDue(t, srv, c.ID)
 
 	queue := decode[page](t, call(t, srv, "GET", "/v1/contents?scope=due", key, nil, "")).Items
 	if len(queue) != 1 {
@@ -424,8 +486,7 @@ func TestArchivedLeavesQueue(t *testing.T) {
 	srv := setup(t)
 	key := registerApp(t, srv, "poster-1")
 
-	past := at(-time.Hour)
-	c := decode[content](t, upload(t, srv, key, past, "isi-berkas"))
+	c := decode[content](t, uploadDue(t, srv, key, "isi-berkas"))
 
 	if res := postJSON(t, srv, "/v1/contents/"+c.ID+"/archival", key, `{}`); res.Code != 200 {
 		t.Fatalf("arsip gagal: %+v", res)
@@ -469,11 +530,9 @@ func TestNoOrphanFileWhenUploadRejected(t *testing.T) {
 	srv, cfg := setupWith(t)
 	key := registerApp(t, srv, "poster-1")
 
-	past := at(-time.Hour)
-
 	// Berkas kosong baru ketahuan sesudah seluruh isinya mengalir — jadi
 	// berkasnya sudah terlanjur ditulis saat unggahannya ditolak.
-	res := upload(t, srv, key, past, "")
+	res := upload(t, srv, key, at(2*time.Hour), "")
 	if res.Status != "invalid_input" {
 		t.Fatalf("berkas kosong harus ditolak, dapat %+v", res)
 	}
@@ -501,14 +560,12 @@ func TestScopeUnusedAndOverdue(t *testing.T) {
 	srv := setup(t)
 	key := registerApp(t, srv, "poster-1")
 
-	past := at(-time.Hour)
-
 	// Satu sudah tayang, satu sedang dipegang, satu masih menunggu jadwal.
-	done := decode[content](t, upload(t, srv, key, past, "sudah-tayang"))
+	done := decode[content](t, uploadDue(t, srv, key, "sudah-tayang"))
 	postJSON(t, srv, "/v1/contents/"+done.ID+"/claim", key, `{}`)
 	postJSON(t, srv, "/v1/contents/"+done.ID+"/publication", key, `{"published":true}`)
 
-	held := decode[content](t, upload(t, srv, key, past, "sedang-dipegang"))
+	held := decode[content](t, uploadDue(t, srv, key, "sedang-dipegang"))
 	postJSON(t, srv, "/v1/contents/"+held.ID+"/claim", key, `{}`)
 
 	upload(t, srv, key, at(24*time.Hour), "besok")
@@ -545,7 +602,7 @@ func TestTotalCountsBeyondThePage(t *testing.T) {
 	key := registerApp(t, srv, "poster-1")
 
 	for i := 0; i < 5; i++ {
-		upload(t, srv, key, at(time.Duration(i)*time.Hour), "isi-berkas")
+		upload(t, srv, key, at(time.Duration(i+2)*time.Hour), "isi-berkas")
 	}
 
 	first := decode[page](t, call(t, srv, "GET", "/v1/contents?limit=2", key, nil, ""))
@@ -585,7 +642,7 @@ func TestOnlyTheClaimerCanReport(t *testing.T) {
 	winner := registerApp(t, srv, "poster-1")
 	loser := registerApp(t, srv, "poster-2")
 
-	c := decode[content](t, upload(t, srv, winner, at(-time.Hour), "isi-berkas"))
+	c := decode[content](t, uploadDue(t, srv, winner, "isi-berkas"))
 	postJSON(t, srv, "/v1/contents/"+c.ID+"/claim", winner, `{}`)
 
 	res := postJSON(t, srv, "/v1/contents/"+c.ID+"/publication", loser, `{"published":true}`)
@@ -617,18 +674,18 @@ func TestRescheduleMissingContentSaysNotFound(t *testing.T) {
 	key := registerApp(t, srv, "poster-1")
 
 	res := postJSON(t, srv, "/v1/contents/tidak-ada/schedule", key,
-		`{"scheduled_at":"`+at(time.Hour)+`"}`)
+		`{"scheduled_at":"`+at(2*time.Hour)+`"}`)
 	if res.Status != "not_found" {
 		t.Fatalf("id yang tidak ada harus not_found, dapat %+v", res)
 	}
 
 	// Yang sudah tayang tetap ditolak dengan sebabnya sendiri.
-	c := decode[content](t, upload(t, srv, key, at(-time.Hour), "isi-berkas"))
+	c := decode[content](t, uploadDue(t, srv, key, "isi-berkas"))
 	postJSON(t, srv, "/v1/contents/"+c.ID+"/claim", key, `{}`)
 	postJSON(t, srv, "/v1/contents/"+c.ID+"/publication", key, `{"published":true}`)
 
 	res = postJSON(t, srv, "/v1/contents/"+c.ID+"/schedule", key,
-		`{"scheduled_at":"`+at(time.Hour)+`"}`)
+		`{"scheduled_at":"`+at(2*time.Hour)+`"}`)
 	if res.Status != "invalid_input" {
 		t.Fatalf("yang sudah tayang harus invalid_input, dapat %+v", res)
 	}
@@ -645,14 +702,14 @@ func TestClaimRejectionNamesTheRealState(t *testing.T) {
 	key := registerApp(t, srv, "poster-1")
 	lain := registerApp(t, srv, "poster-2")
 
-	published := decode[content](t, upload(t, srv, key, at(-time.Hour), "isi-berkas"))
+	published := decode[content](t, uploadDue(t, srv, key, "isi-berkas"))
 	postJSON(t, srv, "/v1/contents/"+published.ID+"/claim", key, `{}`)
 	postJSON(t, srv, "/v1/contents/"+published.ID+"/publication", key, `{"published":true}`)
 
-	archived := decode[content](t, upload(t, srv, key, at(-time.Hour), "isi-berkas"))
+	archived := decode[content](t, uploadDue(t, srv, key, "isi-berkas"))
 	postJSON(t, srv, "/v1/contents/"+archived.ID+"/archival", key, `{}`)
 
-	held := decode[content](t, upload(t, srv, key, at(-time.Hour), "isi-berkas"))
+	held := decode[content](t, uploadDue(t, srv, key, "isi-berkas"))
 	postJSON(t, srv, "/v1/contents/"+held.ID+"/claim", key, `{}`)
 
 	for _, uji := range []struct{ id, sebut string }{
@@ -681,7 +738,7 @@ func TestOversizedUploadIsTheSendersProblem(t *testing.T) {
 	srv, _ := setupTuned(t, func(c *config.Config) { c.MaxUploadMB = 1 })
 	key := registerApp(t, srv, "poster-1")
 
-	res := upload(t, srv, key, at(time.Hour), strings.Repeat("x", 2<<20))
+	res := upload(t, srv, key, at(2*time.Hour), strings.Repeat("x", 2<<20))
 	if res.Status != "invalid_input" {
 		t.Fatalf("berkas kebesaran harus invalid_input, dapat %+v", res)
 	}
@@ -727,18 +784,18 @@ func TestRetentionRemovesFilesButKeepsRecords(t *testing.T) {
 	key := registerApp(t, srv, "poster-1")
 
 	// Sudah tayang, dan sudah lama.
-	tayang := decode[content](t, upload(t, srv, key, at(-time.Hour), "isi-tayang"))
+	tayang := decode[content](t, uploadDue(t, srv, key, "isi-tayang"))
 	postJSON(t, srv, "/v1/contents/"+tayang.ID+"/claim", key, `{}`)
 	postJSON(t, srv, "/v1/contents/"+tayang.ID+"/publication", key, `{"published":true}`)
 	tuakan(t, cfg, tayang.ID, "2020-01-01 00:00:00")
 
 	// Dibatalkan, dan sudah lama.
-	batal := decode[content](t, upload(t, srv, key, at(-time.Hour), "isi-batal"))
+	batal := decode[content](t, uploadDue(t, srv, key, "isi-batal"))
 	postJSON(t, srv, "/v1/contents/"+batal.ID+"/archival", key, `{}`)
 	tuakan(t, cfg, batal.ID, "2020-01-01 00:00:00")
 
 	// Sudah tayang, tapi baru kemarin.
-	baru := decode[content](t, upload(t, srv, key, at(-time.Hour), "isi-baru"))
+	baru := decode[content](t, uploadDue(t, srv, key, "isi-baru"))
 	postJSON(t, srv, "/v1/contents/"+baru.ID+"/claim", key, `{}`)
 	postJSON(t, srv, "/v1/contents/"+baru.ID+"/publication", key, `{"published":true}`)
 
@@ -784,7 +841,7 @@ func TestRetentionIsSafeToRepeat(t *testing.T) {
 	srv, cfg := setupWith(t)
 	key := registerApp(t, srv, "poster-1")
 
-	c := decode[content](t, upload(t, srv, key, at(-time.Hour), "isi-berkas"))
+	c := decode[content](t, uploadDue(t, srv, key, "isi-berkas"))
 	postJSON(t, srv, "/v1/contents/"+c.ID+"/claim", key, `{}`)
 	postJSON(t, srv, "/v1/contents/"+c.ID+"/publication", key, `{"published":true}`)
 	tuakan(t, cfg, c.ID, "2020-01-01 00:00:00")
@@ -814,7 +871,7 @@ func TestPurgedContentAnswersHonestly(t *testing.T) {
 	srv, cfg := setupWith(t)
 	key := registerApp(t, srv, "poster-1")
 
-	c := decode[content](t, upload(t, srv, key, at(-time.Hour), "isi-berkas"))
+	c := decode[content](t, uploadDue(t, srv, key, "isi-berkas"))
 	postJSON(t, srv, "/v1/contents/"+c.ID+"/claim", key, `{}`)
 	postJSON(t, srv, "/v1/contents/"+c.ID+"/publication", key, `{"published":true}`)
 	tuakan(t, cfg, c.ID, "2020-01-01 00:00:00")
@@ -833,7 +890,7 @@ func TestPurgedContentAnswersHonestly(t *testing.T) {
 	// Menjadwalkan ulang: ditolak. Kalau lolos, ia masuk antrean lagi,
 	// integrator mengambilnya, lalu gagal mengunduh selamanya.
 	res = postJSON(t, srv, "/v1/contents/"+c.ID+"/schedule", key,
-		`{"scheduled_at":"`+at(time.Hour)+`"}`)
+		`{"scheduled_at":"`+at(2*time.Hour)+`"}`)
 	if res.Status != "invalid_input" || !strings.Contains(res.Message, "retention") {
 		t.Fatalf("penjadwalan ulang setelah disapu harus menyebut retensi: %+v", res)
 	}
@@ -845,7 +902,7 @@ func TestRetentionOffKeepsEverything(t *testing.T) {
 	srv, cfg := setupTuned(t, func(c *config.Config) { c.RetentionDays = 0 })
 	key := registerApp(t, srv, "poster-1")
 
-	c := decode[content](t, upload(t, srv, key, at(-time.Hour), "isi-berkas"))
+	c := decode[content](t, uploadDue(t, srv, key, "isi-berkas"))
 	postJSON(t, srv, "/v1/contents/"+c.ID+"/claim", key, `{}`)
 	postJSON(t, srv, "/v1/contents/"+c.ID+"/publication", key, `{"published":true}`)
 	tuakan(t, cfg, c.ID, "2020-01-01 00:00:00")
@@ -884,13 +941,13 @@ func TestStuckClaimReturnsToQueue(t *testing.T) {
 	key := registerApp(t, srv, "poster-1")
 
 	// Diclaim lalu ditinggalkan tiga jam lalu — lewat ambang dua jam.
-	nyangkut := decode[content](t, upload(t, srv, key, at(-time.Hour), "isi-nyangkut"))
+	nyangkut := decode[content](t, uploadDue(t, srv, key, "isi-nyangkut"))
 	postJSON(t, srv, "/v1/contents/"+nyangkut.ID+"/claim", key, `{}`)
 	tuakanClaim(t, cfg, nyangkut.ID, at(-3*time.Hour))
 
 	// Baru saja diclaim, dan mungkin sedang mengunggah videonya. Tidak boleh
 	// direbut — kalau direbut, kontennya tayang dua kali.
-	sedangJalan := decode[content](t, upload(t, srv, key, at(-time.Hour), "isi-jalan"))
+	sedangJalan := decode[content](t, uploadDue(t, srv, key, "isi-jalan"))
 	postJSON(t, srv, "/v1/contents/"+sedangJalan.ID+"/claim", key, `{}`)
 
 	if err := janitors[srv].Once(context.Background()); err != nil {
@@ -921,7 +978,7 @@ func TestClaimTimeoutOffKeepsHolding(t *testing.T) {
 	srv, cfg := setupTuned(t, func(c *config.Config) { c.ClaimTimeoutHours = 0 })
 	key := registerApp(t, srv, "poster-1")
 
-	c := decode[content](t, upload(t, srv, key, at(-time.Hour), "isi-berkas"))
+	c := decode[content](t, uploadDue(t, srv, key, "isi-berkas"))
 	postJSON(t, srv, "/v1/contents/"+c.ID+"/claim", key, `{}`)
 	tuakanClaim(t, cfg, c.ID, at(-30*24*time.Hour))
 
@@ -962,7 +1019,7 @@ func TestStaleUploadsAreSweptAway(t *testing.T) {
 
 	// Berkas konten biasa tidak boleh ikut terbawa.
 	key := registerApp(t, srv, "poster-1")
-	c := decode[content](t, upload(t, srv, key, at(time.Hour), "isi-berkas"))
+	c := decode[content](t, upload(t, srv, key, at(2*time.Hour), "isi-berkas"))
 
 	if err := janitors[srv].Once(context.Background()); err != nil {
 		t.Fatal(err)
@@ -1019,7 +1076,7 @@ func TestPurgeDrainsBacklogInOneSweep(t *testing.T) {
 	const jumlah = 5
 	ids := make([]string, 0, jumlah)
 	for i := 0; i < jumlah; i++ {
-		c := decode[content](t, upload(t, srv, key, at(-time.Hour), "isi-berkas"))
+		c := decode[content](t, uploadDue(t, srv, key, "isi-berkas"))
 		postJSON(t, srv, "/v1/contents/"+c.ID+"/claim", key, `{}`)
 		postJSON(t, srv, "/v1/contents/"+c.ID+"/publication", key, `{"published":true}`)
 		tuakan(t, cfg, c.ID, "2020-01-01 00:00:00")
@@ -1034,5 +1091,122 @@ func TestPurgeDrainsBacklogInOneSweep(t *testing.T) {
 		if adaBerkas(t, cfg, id) {
 			t.Fatalf("masih ada berkas yang belum disapu: %s", id)
 		}
+	}
+}
+
+// TestUploadNeedsOneHourLead adalah kesepakatan dengan integrator: jadwal
+// paling cepat sejam dari saat konten diunggah. /schedule sengaja bebas — yang
+// memindahkan jadwal konten gagal boleh mencobanya lagi sekarang juga.
+func TestUploadNeedsOneHourLead(t *testing.T) {
+	srv := setup(t)
+	key := registerApp(t, srv, "poster-1")
+
+	res := upload(t, srv, key, at(30*time.Minute), "isi-berkas")
+	if res.Status != "invalid_input" || !strings.Contains(res.Message, "at least 1 hour") {
+		t.Fatalf("jadwal setengah jam lagi harus ditolak saat unggah, dapat %+v", res)
+	}
+
+	c := decode[content](t, upload(t, srv, key, at(2*time.Hour), "isi-berkas"))
+
+	res = postJSON(t, srv, "/v1/contents/"+c.ID+"/schedule", key,
+		`{"scheduled_at":"`+at(-time.Hour)+`"}`)
+	if res.Code != 200 {
+		t.Fatalf("/schedule tidak terikat batas sejam, dapat %+v", res)
+	}
+}
+
+// TestDueContentIsStreamedOnce: yang sudah waktunya dikabarkan sekali, lengkap
+// dengan path yang benar-benar bisa dibuka. Yang belum waktunya tidak.
+func TestDueContentIsStreamedOnce(t *testing.T) {
+	srv := setup(t)
+	key := registerApp(t, srv, "poster-1")
+
+	due := decode[content](t, uploadDue(t, srv, key, "isi-berkas"))
+	upload(t, srv, key, at(24*time.Hour), "besok")
+
+	for range 2 {
+		if err := janitors[srv].Once(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	events := streams[srv].events
+	if len(events) != 1 || events[0]["id"] != due.ID {
+		t.Fatalf("harusnya satu event untuk yang sudah waktunya, dapat %+v", events)
+	}
+
+	body, err := os.ReadFile(events[0]["path"])
+	if err != nil || string(body) != "isi-berkas" {
+		t.Fatalf("path di event harus menunjuk berkasnya: %q, %v", body, err)
+	}
+
+	after := decode[content](t, call(t, srv, "GET", "/v1/contents/"+due.ID, key, nil, ""))
+	if after.StreamedAt == nil {
+		t.Fatal("streamed_at harus terisi sesudah dikabarkan")
+	}
+}
+
+// TestStreamRetriesWhenRedisIsDown: Redis yang menolak tidak boleh
+// meninggalkan tanda "sudah dikabarkan". Kalau tidak, kontennya tidak pernah
+// sampai ke integrator stream, dan tidak ada yang tahu.
+func TestStreamRetriesWhenRedisIsDown(t *testing.T) {
+	srv := setup(t)
+	key := registerApp(t, srv, "poster-1")
+
+	c := decode[content](t, uploadDue(t, srv, key, "isi-berkas"))
+
+	streams[srv].down = true
+	if err := janitors[srv].Once(context.Background()); err == nil {
+		t.Fatal("Redis yang mati harus dilaporkan sebagai galat")
+	}
+	after := decode[content](t, call(t, srv, "GET", "/v1/contents/"+c.ID, key, nil, ""))
+	if after.StreamedAt != nil {
+		t.Fatal("yang gagal dikabarkan tidak boleh bertanda sudah dikabarkan")
+	}
+
+	streams[srv].down = false
+	if err := janitors[srv].Once(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if events := streams[srv].events; len(events) != 1 || events[0]["id"] != c.ID {
+		t.Fatalf("begitu Redis kembali, kontennya harus dikabarkan, dapat %+v", events)
+	}
+}
+
+// TestRequeuedContentIsStreamedAgain: konten yang kembali ke antrean — lewat
+// /schedule atau claim yang dilepas — harus dikabarkan lagi. Kalau tidak, ia
+// ada di `?scope=due` tapi tidak pernah muncul di stream.
+func TestRequeuedContentIsStreamedAgain(t *testing.T) {
+	srv, cfg := setupWith(t)
+	key := registerApp(t, srv, "poster-1")
+	once := func() {
+		t.Helper()
+		if err := janitors[srv].Once(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	failed := decode[content](t, uploadDue(t, srv, key, "isi-gagal"))
+	stuck := decode[content](t, uploadDue(t, srv, key, "isi-nyangkut"))
+	once()
+
+	postJSON(t, srv, "/v1/contents/"+failed.ID+"/claim", key, `{}`)
+	postJSON(t, srv, "/v1/contents/"+failed.ID+"/publication", key,
+		`{"published":false,"reason":"ditolak platform"}`)
+	postJSON(t, srv, "/v1/contents/"+failed.ID+"/schedule", key,
+		`{"scheduled_at":"`+at(2*time.Hour)+`"}`)
+	makeDue(t, srv, failed.ID)
+
+	postJSON(t, srv, "/v1/contents/"+stuck.ID+"/claim", key, `{}`)
+	tuakanClaim(t, cfg, stuck.ID, at(-3*time.Hour))
+
+	once()
+
+	count := map[string]int{}
+	for _, e := range streams[srv].events {
+		count[e["id"]]++
+	}
+	if count[failed.ID] != 2 || count[stuck.ID] != 2 {
+		t.Fatalf("yang kembali ke antrean harus dikabarkan lagi, dapat %v", count)
 	}
 }

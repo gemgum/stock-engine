@@ -78,6 +78,15 @@ type Config struct {
 	// langsung ke internet: header dari luar tidak akan pernah dipercaya.
 	TrustedProxies []netip.Prefix
 
+	// Redis Stream tempat konten yang sudah waktunya dikabarkan.
+	//
+	// Kosong berarti tidak dipakai, dan servis tetap utuh tanpanya: integrator
+	// yang tidak membaca stream cukup memanggil `?scope=due`. Redis yang mati
+	// tidak menghentikan servis — kontennya dikabarkan begitu Redis kembali.
+	RedisAddr     string
+	RedisPassword string
+	RedisStream   string
+
 	Address string
 }
 
@@ -102,6 +111,9 @@ func Load() (Config, error) {
 		ClaimTimeoutHours: retention("CLAIM_TIMEOUT_HOURS", 2),
 		AllowedOrigins:    split(valueOr("ALLOWED_ORIGINS", "http://localhost:3000")),
 		TrustedProxies:    prefixes(valueOr("TRUSTED_PROXIES", "127.0.0.0/8,::1/128")),
+		RedisAddr:         os.Getenv("REDIS_ADDR"),
+		RedisPassword:     os.Getenv("REDIS_PASSWORD"),
+		RedisStream:       valueOr("REDIS_STREAM", "content.ready"),
 		Address:           valueOr("ADDRESS", ":8080"),
 	}
 

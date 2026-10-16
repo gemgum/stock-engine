@@ -116,7 +116,7 @@ dibuat saat benar-benar ada dua bentuk yang berbeda.
 | Row Level Security | Gudangnya satu: semua aplikasi integrator melihat konten yang sama, jadi tidak ada yang perlu disaring per pemanggil. Ditambah SQLite memang tidak punya RLS. **Kalau suatu hari tiap integrator cuma boleh melihat kontennya sendiri, itu kolom `app_id` di semua tabel — dan keputusan yang jauh lebih murah diambil sekarang daripada saat datanya sudah banyak** |
 | `database.Run` yang menurunkan peran | Ikut hilang bersama RLS. Folder `database/` tetap ada — koneksi dan transaksi tetap perlu — tapi isinya lebih tipis, dan `Run` tidak lagi menerima id pemanggil |
 | Fungsi PL/pgSQL | Tidak ada `clock()` atau yang setara — SQLite tidak punya padanannya. Aturan main tinggal di `services/`, tempat yang wajar untuk aturan yang tidak menopang anti-kecurangan |
-| ~~Pekerjaan yang jalan sendiri~~ | **Sudah ada dua**, di `internal/api/janitor.go` — lihat §7 |
+| ~~Pekerjaan yang jalan sendiri~~ | **Sudah ada empat**, di `internal/api/janitor.go` — lihat §7 |
 
 Yang **tetap** dibawa walau kelihatan bisa dibuang: `problem/`. Isinya lebih
 tipis karena tidak ada galat PL/pgSQL buatan sendiri, tapi penerjemah penolakan
@@ -359,7 +359,7 @@ ikut, karena yang sesudahnya sudah tercatat selesai.
 
 ## 7. Pekerjaan yang jalan sendiri
 
-Dua, dan keduanya tinggal di `internal/api/janitor.go`. Di `api/` karena yang
+Empat, dan semuanya tinggal di `internal/api/janitor.go`. Di `api/` karena yang
 dibutuhkannya sama dengan yang dibutuhkan `Build` — tahu service mana memakai
 repository mana — dan itu memang pekerjaan folder itu. `cmd/api` yang
 menyalakannya dan yang memegang tombol matinya.
@@ -369,6 +369,7 @@ menyalakannya dan yang memegang tombol matinya.
 | Melepas claim yang ditinggalkan | tiap 5 menit | `CLAIM_TIMEOUT_HOURS`, bawaan 2 jam |
 | Membuang berkas yang lewat umurnya | tiap 24 jam | `RETENTION_DAYS`, bawaan 90 hari |
 | Membuang potongan unggahan yang ditinggalkan | tiap 24 jam | 6 jam, tetap |
+| Mengabarkan konten yang sudah waktunya ke Redis Stream | tiap menit | jadwalnya; mati kalau `REDIS_ADDR` kosong |
 
 **Iramanya berbeda karena ambangnya berbeda satuan.** Berkas yang lewat umurnya
 beberapa jam lebih lama tidak merugikan siapa pun. Claim yang tersangkut jam
@@ -423,6 +424,35 @@ dinyalakan.
 Perulangannya berhenti begitu ada berkas yang gagal dihapus. Baris yang gagal
 tidak bertanda, jadi kueri berikutnya mengembalikannya lagi — tanpa penjagaan
 itu sapuannya berputar di baris yang sama selamanya.
+
+### Pengabaran ke Redis Stream
+
+Ditambah atas kesepakatan dengan integrator di VPS yang sama, yang ingin terpicu
+tanpa bertanya berkala. **Bukan karena angka beban** — karena itu opsional, dan
+servis utuh tanpanya.
+
+Yang dipegang:
+
+- **Isinya persis `?scope=due`.** Pengirimnya memanggil `repo.List` dengan
+  `ScopeDue` ditambah `Unstreamed`, bukan kueri sendiri. Dua penyusun "sudah
+  waktunya" akan berbeda tipis, dan integrator stream melihat antrean yang lain
+  dari integrator API.
+- **Event dulu, penanda `streamed_at` belakangan.** Sama alasannya dengan
+  pembuangan berkas: dibalik, Redis yang menolak meninggalkan konten bertanda
+  "sudah dikabarkan" yang tidak pernah sampai. Urutan ini harganya event ganda,
+  dan itu aman karena claim kedua dijawab 409.
+- **Yang kembali ke antrean dikabarkan lagi.** `/schedule` dan pelepasan claim
+  sama-sama mengosongkan `streamed_at`. Jalur baru yang mengembalikan konten ke
+  `scheduled` wajib ikut — kalau lupa, kontennya ada di `?scope=due` tapi tidak
+  pernah muncul di stream.
+- **Claim tidak memeriksa jadwal**, dan itu keputusan. Event bisa basi — konten
+  yang sudah dikabarkan lalu dipindah ke besok masih punya event lamanya — jadi
+  integrator memakai `scheduled_at` dari jawaban claim, bukan dari event.
+- **Stream tidak menerima laporan.** Claim butuh jawaban seketika, dan laporan
+  butuh kunci aplikasi. Keduanya tetap lewat API.
+
+Klien Redis-nya ditulis sendiri di `pkg/redis` — cuma XADD, sekitar enam puluh
+baris RESP — daripada menambah pustaka klien lengkap untuk satu perintah.
 
 ### Kenapa `file_removed_at` kolom sendiri
 

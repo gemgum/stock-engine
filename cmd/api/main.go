@@ -16,8 +16,10 @@ import (
 	"github.com/gemgum/stock-engine/internal/api"
 	"github.com/gemgum/stock-engine/internal/config"
 	"github.com/gemgum/stock-engine/internal/database"
+	"github.com/gemgum/stock-engine/internal/models"
 	"github.com/gemgum/stock-engine/internal/services"
 	"github.com/gemgum/stock-engine/migrations"
+	"github.com/gemgum/stock-engine/pkg/redis"
 )
 
 func main() {
@@ -64,7 +66,14 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 
-	handler, janitor := api.Build(db, files, cfg, logger)
+	// Ditulis sebagai antarmuka yang dibiarkan nil kalau Redis tidak diatur —
+	// bukan *redis.Stream yang nil, yang tetap terhitung "ada" bagi service.
+	var events models.Events
+	if cfg.RedisAddr != "" {
+		events = redis.NewStream(cfg.RedisAddr, cfg.RedisPassword, cfg.RedisStream)
+	}
+
+	handler, janitor := api.Build(db, files, events, cfg, logger)
 
 	// Sapuan berkas berjalan selama servis hidup, dan berhenti begitu servis
 	// diminta mati. Tidak ditunggu: yang terpotong di tengah aman diulang.
@@ -107,7 +116,9 @@ func run(logger *slog.Logger) error {
 	logger.Info("servis menyala",
 		"address", cfg.Address,
 		"storage", cfg.StorageDir,
-		"retensi_hari", cfg.RetentionDays)
+		"retensi_hari", cfg.RetentionDays,
+		"redis", cfg.RedisAddr,
+		"stream", cfg.RedisStream)
 
 	if err := server.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 		return err

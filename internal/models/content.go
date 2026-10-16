@@ -84,9 +84,14 @@ type Content struct {
 	// Barisnya tetap — riwayat "konten ini tayang tanggal sekian" murah
 	// disimpan, yang mahal cuma videonya. Penanda ini yang membuat servis bisa
 	// menjawab jujur: berkasnya dibuang karena umur, bukan hilang karena rusak.
-	FileRemovedAt *Time  `json:"file_removed_at"`
-	UploadedBy    string `json:"uploaded_by"`
-	CreatedAt     Time   `json:"created_at"`
+	FileRemovedAt *Time `json:"file_removed_at"`
+
+	// StreamedAt terisi saat konten dikabarkan ke Redis Stream, dan kosong lagi
+	// begitu ia kembali ke antrean. Yang menjawab "kenapa integrator tidak
+	// menerima konten ini" tanpa harus membuka Redis.
+	StreamedAt *Time  `json:"streamed_at"`
+	UploadedBy string `json:"uploaded_by"`
+	CreatedAt  Time   `json:"created_at"`
 }
 
 // NewContent adalah kiriman unggahan, setelah berkasnya selesai ditulis.
@@ -119,6 +124,11 @@ type ContentFilter struct {
 	// Now dioper dari service, bukan dibaca repository, supaya "sudah waktunya"
 	// dihitung di satu tempat dan bisa diuji tanpa menunggu jam berganti.
 	Now Time
+
+	// Unstreamed menyisakan yang belum dikabarkan ke Redis Stream. Tidak dibuka
+	// lewat HTTP — cuma dipakai pengirim stream, supaya "sudah waktunya" yang
+	// ia kirim sama persis dengan `?scope=due`.
+	Unstreamed bool
 }
 
 // ContentPage adalah satu halaman daftar konten.
@@ -233,12 +243,25 @@ type ContentRepository interface {
 	// antrean lagi, dan itu memang yang diinginkan — kontennya memang terlambat.
 	ReleaseStuckClaims(ctx context.Context, before Time) (int, error)
 
+	// MarkStreamed dipanggil **sesudah** event-nya diterima Redis. Dibalik,
+	// event yang gagal terkirim bertanda "sudah dikabarkan" dan kontennya tidak
+	// pernah sampai ke integrator.
+	MarkStreamed(ctx context.Context, id string, at Time) error
+
 	// MarkFileRemoved dipanggil **sesudah** berkasnya benar-benar dibuang.
 	//
 	// Urutannya tidak boleh dibalik: yang ditandai lebih dulu lalu gagal
 	// menghapus akan meninggalkan berkas yang tidak akan pernah dilirik sapuan
 	// berikutnya.
 	MarkFileRemoved(ctx context.Context, id string, at Time) error
+}
+
+// Events adalah tempat servis mengabarkan konten yang sudah waktunya.
+//
+// Isinya pasangan field-nilai, berurutan: "id", "c6af…", "caption", "…".
+// Nil berarti tidak ada yang dikabari — integrator cukup memakai `?scope=due`.
+type Events interface {
+	Add(ctx context.Context, fields ...string) error
 }
 
 // Files adalah yang perlu diketahui service tentang penyimpanan berkas.

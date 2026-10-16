@@ -28,11 +28,14 @@ import (
 //
 // Janitor dikembalikan, bukan dinyalakan di sini, karena yang memegang tombol
 // matinya harus `cmd/api` — dialah yang tahu kapan servis diminta berhenti.
-func Build(db *database.DB, files models.Files, cfg config.Config,
+//
+// events boleh nil: servis tanpa Redis tetap utuh, integratornya memakai
+// `?scope=due`.
+func Build(db *database.DB, files models.Files, events models.Events, cfg config.Config,
 	logger *slog.Logger) (http.Handler, *Janitor) {
 
 	appService := services.NewAppService(db, repository.App{}, cfg.AdminKey, logger)
-	contentService := services.NewContentService(db, repository.Content{}, files,
+	contentService := services.NewContentService(db, repository.Content{}, files, events,
 		cfg.Retention(), cfg.ClaimTimeout(), logger)
 
 	handler := routes.NewRouter(routes.Options{

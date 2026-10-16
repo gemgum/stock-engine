@@ -13,7 +13,7 @@ type Content struct{}
 
 const contentColumns = `id, filename, mime, size, checksum, caption, platform,
 	scheduled_at, status, claimed_by, claimed_at, published_at, failure_reason,
-	archived_at, file_removed_at, uploaded_by, created_at`
+	archived_at, file_removed_at, streamed_at, uploaded_by, created_at`
 
 func scanContent(row Scanner) (models.Content, error) {
 	var (
@@ -21,13 +21,13 @@ func scanContent(row Scanner) (models.Content, error) {
 		scheduledAt, createdAt             string
 		claimedBy, failureReason           sql.NullString
 		claimedAt, publishedAt, archivedAt sql.NullString
-		fileRemovedAt                      sql.NullString
+		fileRemovedAt, streamedAt          sql.NullString
 		err                                error
 	)
 
 	if err = row.Scan(&c.ID, &c.Filename, &c.Mime, &c.Size, &c.Checksum, &c.Caption,
 		&c.Platform, &scheduledAt, &c.Status, &claimedBy, &claimedAt, &publishedAt,
-		&failureReason, &archivedAt, &fileRemovedAt, &c.UploadedBy, &createdAt); err != nil {
+		&failureReason, &archivedAt, &fileRemovedAt, &streamedAt, &c.UploadedBy, &createdAt); err != nil {
 		return c, err
 	}
 
@@ -47,6 +47,9 @@ func scanContent(row Scanner) (models.Content, error) {
 		return c, err
 	}
 	if c.FileRemovedAt, err = ReadTimePtr(fileRemovedAt); err != nil {
+		return c, err
+	}
+	if c.StreamedAt, err = ReadTimePtr(streamedAt); err != nil {
 		return c, err
 	}
 
@@ -108,6 +111,9 @@ func contentWhere(f models.ContentFilter) (string, []any) {
 	if f.Platform != "" {
 		where += ` AND platform = ?`
 		args = append(args, f.Platform)
+	}
+	if f.Unstreamed {
+		where += ` AND streamed_at IS NULL`
 	}
 	return where, args
 }
@@ -198,9 +204,12 @@ func (Content) SetSchedule(ctx context.Context, id string, at models.Time) (bool
 	// sapuan retensi tidak boleh kembali ke antrean — integrator akan
 	// mengambilnya, gagal mengunduh, dan yang terlihat cuma kegagalan berulang
 	// tanpa sebab yang jelas.
+	//
+	// streamed_at dikosongkan supaya konten ini dikabarkan lagi di jadwal
+	// barunya.
 	const q = `UPDATE contents
 		SET scheduled_at = ?, status = ?, claimed_by = NULL, claimed_at = NULL,
-		    failure_reason = NULL
+		    failure_reason = NULL, streamed_at = NULL
 		WHERE id = ? AND status != ? AND file_removed_at IS NULL`
 
 	changed, err := Exec(ctx, q, Stamp(at), models.StatusScheduled, id, models.StatusPublished)
@@ -242,6 +251,11 @@ func (Content) ExpiredFiles(ctx context.Context, before models.Time, limit int) 
 		models.StatusPublished, models.StatusArchived, Stamp(before), limit)
 }
 
+func (Content) MarkStreamed(ctx context.Context, id string, at models.Time) error {
+	_, err := Exec(ctx, `UPDATE contents SET streamed_at = ? WHERE id = ?`, Stamp(at), id)
+	return err
+}
+
 func (Content) MarkFileRemoved(ctx context.Context, id string, at models.Time) error {
 	_, err := Exec(ctx, `UPDATE contents SET file_removed_at = ? WHERE id = ?`, Stamp(at), id)
 	return err
@@ -256,9 +270,13 @@ func (Content) MarkFileRemoved(ctx context.Context, id string, at models.Time) e
 // `failure_reason` sengaja tidak diisi. Yang terjadi bukan kegagalan yang
 // dilaporkan siapa pun — tidak ada yang tahu apa yang terjadi di sana, dan
 // mengarangnya akan tercampur dengan alasan gagal yang sungguhan.
+//
+// streamed_at ikut dikosongkan. Kalau tidak, konten yang dilepas kembali ke
+// `?scope=due` tapi tidak pernah dikabarkan lagi ke Redis Stream — integrator
+// yang cuma membaca stream tidak akan pernah melihatnya.
 func (Content) ReleaseStuckClaims(ctx context.Context, before models.Time) (int, error) {
 	const q = `UPDATE contents
-		SET status = ?, claimed_by = NULL, claimed_at = NULL
+		SET status = ?, claimed_by = NULL, claimed_at = NULL, streamed_at = NULL
 		WHERE status = ? AND claimed_at <= ?`
 
 	changed, err := Exec(ctx, q, models.StatusScheduled, models.StatusClaimed, Stamp(before))

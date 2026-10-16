@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,6 +22,9 @@ type ContentService struct {
 	repo  models.ContentRepository
 	files models.Files
 
+	// events dikabari konten yang sudah waktunya. Nil berarti tidak dipakai.
+	events models.Events
+
 	// retention adalah umur berkas yang sudah selesai sebelum boleh dibuang.
 	// Nol berarti tidak pernah dibuang.
 	retention time.Duration
@@ -35,13 +39,14 @@ type ContentService struct {
 }
 
 func NewContentService(db database.Runner, repo models.ContentRepository,
-	files models.Files, retention, claimTimeout time.Duration,
+	files models.Files, events models.Events, retention, claimTimeout time.Duration,
 	logger *slog.Logger) *ContentService {
 
 	return &ContentService{
 		base:         base{db: db, logger: logger},
 		repo:         repo,
 		files:        files,
+		events:       events,
 		retention:    retention,
 		claimTimeout: claimTimeout,
 		now:          models.Now,
@@ -57,7 +62,7 @@ func NewContentService(db database.Runner, repo models.ContentRepository,
 func (s *ContentService) Upload(ctx context.Context, actor string, in models.NewContent,
 	src io.Reader) (models.Content, error) {
 
-	if err := validateUpload(in); err != nil {
+	if err := s.validateUpload(in); err != nil {
 		return models.Content{}, logError(ctx, s.logger, "ContentService.Upload", actor, err)
 	}
 
@@ -91,12 +96,44 @@ func (s *ContentService) Upload(ctx context.Context, actor string, in models.New
 	return created, nil
 }
 
-func validateUpload(in models.NewContent) error {
+func (s *ContentService) validateUpload(in models.NewContent) error {
 	if strings.TrimSpace(in.Filename) == "" {
 		return httpx.BadRequest("The file has no name.")
 	}
-	if in.ScheduledAt.IsZero() {
+	return s.checkSchedule(in.ScheduledAt)
+}
+
+// minLeadTime adalah jarak terdekat jadwal dari saat konten diunggah.
+//
+// Kesepakatan dengan integrator: konten yang dijadwalkan "sekarang juga" sudah
+// telat sebelum sempat dikabarkan, dan yang dijadwalkan di masa lalu langsung
+// tayang tanpa ada yang sempat memeriksanya.
+//
+// **Cuma saat unggah.** /schedule sengaja bebas: yang memindahkan jadwal
+// manusia yang sedang mengurus konten gagal, dan ia boleh mencobanya lagi
+// sekarang juga.
+const minLeadTime = time.Hour
+
+func requireSchedule(at models.Time) error {
+	if at.IsZero() {
 		return httpx.BadRequest("Field 'scheduled_at' is required, in 'YYYY-MM-DD HH:MM:SS' server time.")
+	}
+	return nil
+}
+
+// checkSchedule menegakkan minLeadTime.
+//
+// Waktu server ikut disebut di pesannya: yang paling sering salah bukan
+// jadwalnya, melainkan zona waktu yang dibayangkan pengirimnya.
+func (s *ContentService) checkSchedule(at models.Time) error {
+	if err := requireSchedule(at); err != nil {
+		return err
+	}
+
+	now := s.now()
+	if at.Before(now.Add(minLeadTime)) {
+		return httpx.BadRequest("Field 'scheduled_at' must be at least 1 hour from now. Server time is " +
+			now.String() + ".")
 	}
 	return nil
 }
@@ -279,9 +316,8 @@ func (s *ContentService) whyNotReportable(ctx context.Context, id string) error 
 func (s *ContentService) Reschedule(ctx context.Context, actor, id string,
 	at models.Time) (models.Content, error) {
 
-	if at.IsZero() {
-		return models.Content{}, logError(ctx, s.logger, "ContentService.Reschedule", actor,
-			httpx.BadRequest("Field 'scheduled_at' is required, in 'YYYY-MM-DD HH:MM:SS' server time."))
+	if err := requireSchedule(at); err != nil {
+		return models.Content{}, logError(ctx, s.logger, "ContentService.Reschedule", actor, err)
 	}
 
 	return run(ctx, s.base, "ContentService.Reschedule", actor,
@@ -439,6 +475,84 @@ func (s *ContentService) PurgeStaleUploads(ctx context.Context) (int, error) {
 		s.logger.Info("berkas sementara yang ditinggalkan dibuang", "jumlah", dibuang)
 	}
 	return dibuang, nil
+}
+
+// streamBatch adalah berapa konten yang diambil sekali kueri saat mengabari
+// stream. Satu jalan mengulang sampai habis, sama seperti sapuan berkas.
+const streamBatch = 200
+
+// StreamDue mengabarkan konten yang sudah waktunya ke Redis Stream.
+//
+// Yang dikirim persis isi `?scope=due` yang belum pernah dikabarkan — satu
+// penyaring, dua jalur, supaya yang dilihat integrator stream dan integrator
+// API tidak pernah berbeda.
+//
+// Urutannya event dulu, penandanya belakangan. Kalau penandaan gagal, konten
+// itu dikabarkan dua kali — aman, karena claim kedua dijawab 409. Dibalik,
+// Redis yang menolak meninggalkan konten bertanda "sudah dikabarkan" yang
+// tidak pernah sampai ke siapa pun.
+//
+// Redis yang mati menghentikan jalan ini tanpa menandai apa pun. Kontennya
+// dikabarkan di jalan berikutnya, dan sementara itu tetap ada di `?scope=due`.
+func (s *ContentService) StreamDue(ctx context.Context) (int, error) {
+	if s.events == nil {
+		return 0, nil
+	}
+
+	total := 0
+	for ctx.Err() == nil {
+		filter := models.ContentFilter{Scope: models.ScopeDue, Now: s.now(),
+			Unstreamed: true, Limit: streamBatch}
+
+		due, err := run(ctx, s.base, "ContentService.StreamDue", models.AdminID,
+			func(ctx context.Context) ([]models.Content, error) {
+				return s.repo.List(ctx, filter)
+			})
+		if err != nil {
+			return total, err
+		}
+
+		for _, c := range due {
+			if err := s.events.Add(ctx, s.event(c)...); err != nil {
+				return total, httpx.ServerError(err)
+			}
+
+			_, err := run(ctx, s.base, "ContentService.StreamDue", models.AdminID,
+				func(ctx context.Context) (struct{}, error) {
+					return struct{}{}, s.repo.MarkStreamed(ctx, c.ID, s.now())
+				})
+			if err != nil {
+				return total, err
+			}
+			total++
+		}
+
+		if len(due) < streamBatch {
+			break
+		}
+	}
+
+	if total > 0 {
+		s.logger.Info("konten dikabarkan ke stream", "jumlah", total)
+	}
+	return total, nil
+}
+
+// event menyusun isi satu event. Nama field-nya sama dengan JSON di API,
+// ditambah `path` — letak berkasnya di disk, supaya integrator di mesin yang
+// sama tidak perlu mengunduhnya.
+func (s *ContentService) event(c models.Content) []string {
+	return []string{
+		"id", c.ID,
+		"filename", c.Filename,
+		"mime", c.Mime,
+		"size", strconv.FormatInt(c.Size, 10),
+		"checksum", c.Checksum,
+		"caption", c.Caption,
+		"platform", c.Platform,
+		"scheduled_at", c.ScheduledAt.String(),
+		"path", s.files.Path(c.ID),
+	}
 }
 
 // ReleaseStuckClaims mengembalikan konten yang diclaim lalu ditinggalkan.

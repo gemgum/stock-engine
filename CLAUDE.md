@@ -18,6 +18,7 @@ server. Kliennya aplikasi milik developer lain.
 | Database | **SQLite** (`modernc.org/sqlite`, Go murni). Alasannya pencadangan, bukan beban — `ARCHITECTURE.md` §6 |
 | Migrasi | Berkas SQL di `migrations/`, ikut masuk binary, dicatat di `schema_migrations`. Nomor berkas menentukan urutan |
 | Penyimpanan berkas | Disk servis, satu folder bersama databasenya |
+| Kabar ke integrator | **Redis Stream, opsional** (`REDIS_ADDR`). Servis cuma menulis; claim dan lapor tetap lewat API |
 | Auth | Kunci API per aplikasi, disimpan ter-hash. Kunci induk dari environment |
 | Kepemilikan konten | **Satu gudang bersama.** Semua aplikasi melihat isi yang sama |
 | Lingkup | **Gudang dan jadwal saja.** Servis ini tidak memposting apa pun |
@@ -104,7 +105,8 @@ lengkap di atas SQLite sungguhan, seperti `internal/api/api_test.go`.
   berbagi satu jatah dan satu aplikasi yang beruntun mematikan yang lain. Header
   alamat asli **cuma dipercaya dari jaringan di `TRUSTED_PROXIES`**; dari luar
   itu siapa pun bisa mengarangnya.
-- **Tiga pekerjaan jalan sendiri, dan semuanya harus aman diulang.** Claim yang
+- **Empat pekerjaan jalan sendiri, dan semuanya harus aman diulang.** Konten
+  yang sudah waktunya dikabarkan ke Redis Stream (tiap menit); claim yang
   ditinggalkan dilepas setelah 2 jam (tiap 5 menit); berkas konten yang sudah
   selesai dibuang setelah 90 hari (tiap 24 jam); potongan unggahan yang
   ditinggalkan servis yang mati mendadak dibuang setelah 6 jam — yang terakhir
@@ -112,6 +114,17 @@ lengkap di atas SQLite sungguhan, seperti `internal/api/api_test.go`.
   kebijakan penyimpanan. Aturannya di `ARCHITECTURE.md` §7. Yang paling mudah terbalik: **berkas dibuang dulu,
   penandanya belakangan** — dibalik, berkas yang gagal dihapus akan bertanda
   "sudah dibuang" dan tidak akan pernah dilirik lagi.
+- **Redis Stream cuma pengabar, bukan sumber kebenaran.** Isinya persis
+  `?scope=due`, lewat penyaring yang sama. Event dulu, penanda `streamed_at`
+  belakangan — dibalik, Redis yang menolak meninggalkan konten bertanda "sudah
+  dikabarkan" yang tidak pernah sampai ke siapa pun. Setiap jalur yang
+  mengembalikan konten ke antrean ikut mengosongkan `streamed_at`. Redis
+  ditambah karena kesepakatan dengan integrator, bukan karena angka beban —
+  dan karena itu ia opsional: servis utuh tanpanya.
+- **Jadwal paling cepat 1 jam dari saat diunggah** (`checkSchedule`). Cuma saat
+  unggah — `/schedule` sengaja bebas, supaya konten gagal bisa dicoba lagi
+  sekarang juga. Claim tidak memeriksa jadwal; integrator stream memakai
+  `scheduled_at` dari jawaban claim, karena event bisa basi.
 - **Ambang lepas claim jangan dipendekkan tanpa alasan.** Integrator yang masih
   mengunggah video besar di jaringan pelan akan direbut aplikasi lain, dan
   kontennya tayang dua kali — persis yang seluruh mekanisme claim ini cegah.
