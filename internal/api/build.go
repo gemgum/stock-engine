@@ -35,8 +35,9 @@ func Build(db *database.DB, files models.Files, events models.Events, cfg config
 	logger *slog.Logger) (http.Handler, *Janitor) {
 
 	appService := services.NewAppService(db, repository.App{}, cfg.AdminKey, logger)
-	contentService := services.NewContentService(db, repository.Content{}, files, events,
-		cfg.Retention(), cfg.ClaimTimeout(), logger)
+	platformService := services.NewPlatformService(db, repository.Platform{}, logger)
+	contentService := services.NewContentService(db, repository.Content{}, repository.Platform{},
+		files, events, cfg.Retention(), cfg.ClaimTimeout(), logger)
 
 	handler := routes.NewRouter(routes.Options{
 		Logger:         logger,
@@ -46,8 +47,9 @@ func Build(db *database.DB, files models.Files, events models.Events, cfg config
 		TrustedProxies: cfg.TrustedProxies,
 		Alive:          db.Ping,
 
-		Content: handlers.NewContentHandler(contentService, cfg.MaxUploadBytes(), logger),
-		App:     handlers.NewAppHandler(appService, logger),
+		Content:  handlers.NewContentHandler(contentService, cfg.MaxUploadBytes(), logger),
+		App:      handlers.NewAppHandler(appService, logger),
+		Platform: handlers.NewPlatformHandler(platformService, logger),
 	})
 
 	return handler, NewJanitor(contentService, logger)

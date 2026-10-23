@@ -170,6 +170,18 @@ token OAuth tiap platform.
 | `POST /v1/apps` | daftarkan; kuncinya keluar sekali saja, sesudah itu tinggal hashnya |
 | `POST /v1/apps/{id}/revocation` | cabut kuncinya |
 
+**`platforms` — nama yang sah untuk field `platform`**
+
+| Alamat | Guna |
+|---|---|
+| `GET /v1/platforms` | daftar; terbuka untuk integrator |
+| `POST /v1/platforms` | daftarkan, atau aktifkan lagi yang diarsipkan; kunci induk saja |
+| `POST /v1/platforms/{name}/archival` | tutup untuk unggahan baru; konten lamanya tetap tersaring |
+
+Namanya sekaligus kuncinya — `{name}`, bukan `{id}` — karena itulah yang
+ditulis integrator di unggahan dan saringan. Sebelum ada daftar ini, `platform`
+teks bebas dan salah ketik diam-diam hilang dari `?platform=`.
+
 **Sisanya:** `GET /v1/me` dan `GET /healthz`.
 
 ### Kenapa `?scope=due` ada

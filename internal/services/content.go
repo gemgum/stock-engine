@@ -19,8 +19,9 @@ import (
 // diambil satu aplikasi, dan berkas tidak pernah tertinggal tanpa barisnya.
 type ContentService struct {
 	base
-	repo  models.ContentRepository
-	files models.Files
+	repo      models.ContentRepository
+	platforms models.PlatformRepository
+	files     models.Files
 
 	// events dikabari konten yang sudah waktunya. Nil berarti tidak dipakai.
 	events models.Events
@@ -39,12 +40,13 @@ type ContentService struct {
 }
 
 func NewContentService(db database.Runner, repo models.ContentRepository,
-	files models.Files, events models.Events, retention, claimTimeout time.Duration,
+	platforms models.PlatformRepository, files models.Files, events models.Events, retention, claimTimeout time.Duration,
 	logger *slog.Logger) *ContentService {
 
 	return &ContentService{
 		base:         base{db: db, logger: logger},
 		repo:         repo,
+		platforms:    platforms,
 		files:        files,
 		events:       events,
 		retention:    retention,
@@ -64,6 +66,15 @@ func (s *ContentService) Upload(ctx context.Context, actor string, in models.New
 
 	if err := s.validateUpload(in); err != nil {
 		return models.Content{}, logError(ctx, s.logger, "ContentService.Upload", actor, err)
+	}
+
+	// Diperiksa sebelum berkasnya ditulis: menolak nama salah ketik sesudah
+	// 200MB terlanjur mengalir ke disk cuma membuang waktu pengirimnya.
+	if _, err := run(ctx, s.base, "ContentService.Upload", actor,
+		func(ctx context.Context) (struct{}, error) {
+			return struct{}{}, checkPlatform(ctx, s.platforms, in.Platform, true)
+		}); err != nil {
+		return models.Content{}, err
 	}
 
 	in.ID = models.NewID()
@@ -99,6 +110,9 @@ func (s *ContentService) Upload(ctx context.Context, actor string, in models.New
 func (s *ContentService) validateUpload(in models.NewContent) error {
 	if strings.TrimSpace(in.Filename) == "" {
 		return httpx.BadRequest("The file has no name.")
+	}
+	if in.Platform == "" {
+		return httpx.BadRequest("Field 'platform' is required. See GET /v1/platforms.")
 	}
 	return s.checkSchedule(in.ScheduledAt)
 }
@@ -151,6 +165,14 @@ func (s *ContentService) List(ctx context.Context, actor string,
 
 	return run(ctx, s.base, "ContentService.List", actor,
 		func(ctx context.Context) (models.ContentPage, error) {
+			// Nama yang tidak dikenal ditolak, bukan dijawab daftar kosong —
+			// alasannya sama dengan `scope`. Yang diarsipkan tetap boleh.
+			if filter.Platform != "" {
+				if err := checkPlatform(ctx, s.platforms, filter.Platform, false); err != nil {
+					return models.ContentPage{}, err
+				}
+			}
+
 			items, err := s.repo.List(ctx, filter)
 			if err != nil {
 				return models.ContentPage{}, err

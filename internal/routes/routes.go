@@ -39,8 +39,9 @@ type Options struct {
 	// dipakai uji yang merakit router tanpa database.
 	Alive func(ctx context.Context) error
 
-	Content *handlers.ContentHandler
-	App     *handlers.AppHandler
+	Content  *handlers.ContentHandler
+	App      *handlers.AppHandler
+	Platform *handlers.PlatformHandler
 }
 
 // Batas permintaan.
@@ -73,6 +74,7 @@ func NewRouter(opts Options) http.Handler {
 
 	Content(mux, guard, opts.Content)
 	App(mux, guard, admin, opts.App)
+	Platform(mux, guard, admin, opts.Platform)
 
 	// Urutannya dari luar ke dalam: yang pertama disebut yang pertama menyentuh
 	// permintaan. Recover paling luar supaya panic di middleware mana pun ikut

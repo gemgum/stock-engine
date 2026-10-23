@@ -179,6 +179,12 @@ func postJSON(t *testing.T, srv *httptest.Server, path, key, body string) envelo
 // upload mengirim satu berkas beserta jadwalnya.
 func upload(t *testing.T, srv *httptest.Server, key, scheduledAt, body string) envelope {
 	t.Helper()
+	return uploadTo(t, srv, key, scheduledAt, body, "instagram")
+}
+
+// uploadTo sama dengan upload, dengan platform pilihan.
+func uploadTo(t *testing.T, srv *httptest.Server, key, scheduledAt, body, platform string) envelope {
+	t.Helper()
 
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
@@ -192,7 +198,7 @@ func upload(t *testing.T, srv *httptest.Server, key, scheduledAt, body string) e
 	}
 	_ = mw.WriteField("scheduled_at", scheduledAt)
 	_ = mw.WriteField("caption", "halo dunia")
-	_ = mw.WriteField("platform", "instagram")
+	_ = mw.WriteField("platform", platform)
 	if err := mw.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -1208,5 +1214,54 @@ func TestRequeuedContentIsStreamedAgain(t *testing.T) {
 	}
 	if count[failed.ID] != 2 || count[stuck.ID] != 2 {
 		t.Fatalf("yang kembali ke antrean harus dikabarkan lagi, dapat %v", count)
+	}
+}
+
+// TestPlatformMustBeRegistered memastikan salah ketik ditolak saat unggah,
+// bukan diam-diam hilang dari `?platform=`.
+func TestPlatformMustBeRegistered(t *testing.T) {
+	srv := setup(t)
+	key := registerApp(t, srv, "poster-1")
+
+	for _, name := range []string{"Instagram", "instgram", ""} {
+		if res := uploadTo(t, srv, key, at(2*time.Hour), "isi", name); res.Status != "invalid_input" {
+			t.Fatalf("platform %q harus ditolak, dapat %+v", name, res)
+		}
+	}
+	if res := call(t, srv, "GET", "/v1/contents?platform=instgram", key, nil, ""); res.Status != "invalid_input" {
+		t.Fatalf("saringan nama asing harus ditolak, dapat %+v", res)
+	}
+
+	// Mengubah daftar cuma kunci induk.
+	if res := postJSON(t, srv, "/v1/platforms", key, `{"name":"youtube"}`); res.Code != http.StatusUnauthorized {
+		t.Fatalf("kunci aplikasi harus ditolak, dapat %+v", res)
+	}
+	if res := postJSON(t, srv, "/v1/platforms", adminKey, `{"name":"YouTube"}`); res.Status != "invalid_input" {
+		t.Fatalf("huruf besar harus ditolak, dapat %+v", res)
+	}
+	if res := postJSON(t, srv, "/v1/platforms", adminKey, `{"name":"youtube"}`); res.Code != http.StatusCreated {
+		t.Fatalf("daftar platform gagal: %+v", res)
+	}
+	if res := uploadTo(t, srv, key, at(2*time.Hour), "isi", "youtube"); res.Code != http.StatusCreated {
+		t.Fatalf("platform baru harus bisa dipakai, dapat %+v", res)
+	}
+
+	// Diarsipkan: unggahan baru ditolak, konten lamanya tetap tersaring.
+	if res := postJSON(t, srv, "/v1/platforms/youtube/archival", adminKey, ``); res.Code != http.StatusOK {
+		t.Fatalf("arsip gagal: %+v", res)
+	}
+	if res := uploadTo(t, srv, key, at(2*time.Hour), "isi", "youtube"); res.Status != "invalid_input" {
+		t.Fatalf("platform terarsip harus menolak unggahan, dapat %+v", res)
+	}
+	if got := decode[page](t, call(t, srv, "GET", "/v1/contents?scope=all&platform=youtube", key, nil, "")); got.Total != 1 {
+		t.Fatalf("konten lama harus tetap tersaring, dapat %+v", got)
+	}
+
+	// Mendaftarkan lagi mengaktifkannya kembali.
+	if res := postJSON(t, srv, "/v1/platforms", adminKey, `{"name":"youtube"}`); res.Code != http.StatusCreated {
+		t.Fatalf("daftar ulang gagal: %+v", res)
+	}
+	if res := uploadTo(t, srv, key, at(2*time.Hour), "isi", "youtube"); res.Code != http.StatusCreated {
+		t.Fatalf("platform aktif lagi harus bisa dipakai, dapat %+v", res)
 	}
 }

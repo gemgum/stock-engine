@@ -96,6 +96,8 @@ tidak ada `PATCH`, `PUT`, atau `DELETE`; alasannya di `ARCHITECTURE.md` §4.
 | `POST /v1/contents/{id}/publication` | lapor hasilnya |
 | `POST /v1/contents/{id}/archival` | keluarkan dari antrean |
 | `GET /v1/apps` · `POST /v1/apps` · `POST /v1/apps/{id}/revocation` | kunci induk saja |
+| `GET /v1/platforms` | nama platform yang sah |
+| `POST /v1/platforms` · `POST /v1/platforms/{name}/archival` | daftarkan (`{"name":"youtube"}`, juga mengaktifkan lagi yang diarsipkan) · arsipkan. Kunci induk saja |
 | `GET /v1/me` | siapa saya |
 | `GET /healthz` | terbuka, ikut memeriksa database |
 
@@ -172,7 +174,8 @@ kelihatan.
 | `id` | penanda acak, bukan nomor urut — dipakai di semua alamat |
 | `filename` · `mime` · `size` | keterangan berkasnya. Nama aslinya tidak dipakai sebagai nama berkas di disk |
 | `checksum` | SHA-256 berkasnya. Cocokkan setelah mengunduh kalau kamu tidak mau mempercayai jaringan |
-| `caption` · `platform` | teks bebas yang kamu isi saat mengunggah. Servis tidak menafsirkannya |
+| `caption` | teks bebas yang kamu isi saat mengunggah. Servis tidak menafsirkannya |
+| `platform` | salah satu nama di `GET /v1/platforms` |
 | `status` | lihat **Perjalanan satu konten** di bawah |
 | `claimed_by` · `claimed_at` | aplikasi yang sedang memegangnya |
 | `published_at` | terisi saat dilaporkan tayang |
@@ -191,7 +194,7 @@ Multipart, bukan JSON berisi base64: base64 membengkakkan video 200MB jadi 267MB
 | `file` | ya | berkasnya |
 | `scheduled_at` | ya | `YYYY-MM-DD HH:MM:SS`, waktu server, **paling cepat 1 jam dari saat diunggah**. `/schedule` tidak terikat batas ini |
 | `caption` | tidak | teks bebas |
-| `platform` | tidak | teks bebas, dipakai menyaring `?platform=` |
+| `platform` | ya | salah satu nama aktif di `GET /v1/platforms`, huruf kecil persis. Nama lain ditolak — `?platform=` dengan nama yang tidak terdaftar juga |
 
 ### Waktu
 

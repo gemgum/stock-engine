@@ -142,6 +142,98 @@
       ]
     },
     {
+      "name": "Platform",
+      "description": "Nama yang sah untuk field `platform`. Membaca terbuka untuk integrator; mengubah cuma ADMIN_KEY.",
+      "item": [
+        {
+          "name": "GET /v1/platforms",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{app_key}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/platforms",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "platforms"
+              ]
+            }
+          }
+        },
+        {
+          "name": "POST /v1/platforms",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{admin_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/platforms",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "platforms"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"youtube\"\n}"
+            },
+            "description": "Huruf kecil, angka, dan '-'. Mendaftarkan nama yang diarsipkan mengaktifkannya lagi."
+          }
+        },
+        {
+          "name": "POST /v1/platforms/{name}/archival",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{admin_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/platforms/youtube/archival",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "platforms",
+                "youtube",
+                "archival"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}"
+            },
+            "description": "Menutup untuk unggahan baru. Konten lamanya tetap bisa disaring dengan ?platform=."
+          }
+        }
+      ]
+    },
+    {
       "name": "Alur integrator",
       "description": "Empat langkah, urutannya tidak boleh dibalik.",
       "item": [
